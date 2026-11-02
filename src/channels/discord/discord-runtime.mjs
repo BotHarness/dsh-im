@@ -937,10 +937,11 @@ export class DiscordRuntime {
 
   async #acceptExternalMessage(message, sequence, generation) {
     if (!this.#account || !this.#status.ready || generation !== this.#generation
-      || !message?.guild_id || message.author?.bot === true || message.webhook_id
+      || !message?.guild_id || message.webhook_id || message.author?.id === this.#account.userId
       || !Array.isArray(message.mentions)) return;
     let mentioned = message.mentions.some(user => user.id === this.#account.userId);
     const roleCandidate = Array.isArray(message.mention_roles) && message.mention_roles.some(discordSnowflake);
+    if (message.author?.bot === true && !mentioned && !roleCandidate) return;
     if (!mentioned && !roleCandidate && (!this.#ordinaryAuthorized || this.#externalOrdinaryText() !== true
       || typeof message.content !== 'string' || !message.content.trim())) return;
     const checked = this.#checkedLifetime();
@@ -951,6 +952,7 @@ export class DiscordRuntime {
       mentioned = discordMessageMentionsAccount(message, checked.account, channel);
     }
     if (!mentioned) {
+      if (message.author?.bot === true) return;
       if (!this.#ordinaryAuthorized || this.#externalOrdinaryText() !== true
         || typeof message.content !== 'string' || !message.content.trim()) return;
       const application = await checked.api.getCurrentApplication({ signal: checked.signal });

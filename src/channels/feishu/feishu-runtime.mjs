@@ -23,6 +23,7 @@ import {
   sendRememberedConnectionTest,
 } from '../shared/connection-test.mjs';
 import { t } from '../shared/i18n.mjs';
+import { sourceSenderMatches } from './external-sender.mjs';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const CALLBACK_PROBE_SUCCESS_NOTICE = '✅ 修复完成：已实测收到 card.action.trigger，菜单按钮现在可用。';
@@ -30,6 +31,23 @@ const CALLBACK_PROBE_TIMEOUT_NOTICE = '⚠️ 修复验证超时：未收到测�
 const CALLBACK_PROBE_SEND_FAILURE_NOTICE = '⚠️ 修复验证失败：无法发送专用测试卡，不能确认 card.action.trigger 已恢复。请不要重复授权；先检查机器人消息权限和连接状态。';
 const CALLBACK_PROBE_ABORT_NOTICE = '⚠️ 修复验证中断：Runtime 已停止，未完成 card.action.trigger 实测，不能确认修复成功。请不要重复授权；先等待机器人恢复连接。';
 const REUSABLE_WS_STATES = new Set(['connected', 'connecting', 'reconnecting']);
+
+// Checked Bot replies arrive as Markdown. Lark shows it only inside a card, so
+// a reply that uses Markdown goes out as the same native Markdown element as
+// chat. Plain replies and replies carrying a text-message <at user_id> stay
+// text: cards do not render that mention syntax, and other Bots and own echoes
+// are read from text messages only.
+const MARKDOWN_SYNTAX = /(^|\n)[ \t]{0,3}(#{1,6}[ \t]|[-*+][ \t]|\d{1,9}[.)][ \t]|>|```|\|.*\|)|\*\*\S|__\S|~~\S|`[^`\n]+`|\[[^\]\n]+\]\([^)\s]+\)/;
+
+export function checkedTextFormat(text) {
+  return !text.includes('<at ') && MARKDOWN_SYNTAX.test(text) ? 'markdown' : 'plain';
+}
+
+function textMessage(text, format) {
+  return format === 'markdown'
+    ? { msg_type: 'interactive', content: JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown', content: text }] } }) }
+    : { msg_type: 'text', content: JSON.stringify({ text }) };
+}
 
 function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -773,7 +791,7 @@ export class FeishuRuntime {
     if (!allowed)
       throw Object.assign(new Error('send-permission-denied'), { code: 'send-permission-denied' });
     return this.sendProactiveText({kind: 'group', route: {chatId: conversationId}}, text,
-      {...options, receipt: true});
+      {...options, format: checkedTextFormat(text), receipt: true});
   }
 
   async sendProactiveText(target, text, { signal, format = 'plain', receipt = false, beforeSend } = {}) {
@@ -804,9 +822,7 @@ export class FeishuRuntime {
     signal?.throwIfAborted();
     // Use the same native Markdown element as chat, without opening a stream
     // or retrying as plain text after a possibly accepted delivery.
-    const content = format === 'markdown'
-      ? { schema: '2.0', body: { elements: [{ tag: 'markdown', content: text }] } }
-      : { text };
+    const message = textMessage(text, format);
     const client = this.#client;
     const allowed = beforeSend === undefined || (typeof beforeSend === 'function' && beforeSend() === true);
     signal?.throwIfAborted();
@@ -818,8 +834,7 @@ export class FeishuRuntime {
       params: { receive_id_type: receiveIdType },
       data: {
         receive_id: receiveId,
-        msg_type: format === 'markdown' ? 'interactive' : 'text',
-        content: JSON.stringify(content),
+        ...message,
       },
     });
     if (response?.code && response.code !== 0) {
@@ -918,8 +933,7 @@ export class FeishuRuntime {
     const current = await client.im.v1.message.get({ path: { message_id: route.messageId } });
     const source = current?.data?.items?.find(item => item.message_id === route.messageId);
     if (current?.code || !source || source.deleted === true || source.chat_id !== route.conversationId
-      || source.sender?.sender_type !== 'user' || source.sender?.id_type !== 'open_id'
-      || source.sender?.id !== route.actorId || (source.thread_id || undefined) !== route.threadId
+      || !sourceSenderMatches(source.sender, route.actorId) || (source.thread_id || undefined) !== route.threadId
       || (source.root_id || undefined) !== route.rootId || (source.parent_id || undefined) !== route.parentId)
       throw Object.assign(new Error('stale-route'), { code: 'stale-route' });
     signal?.throwIfAborted();
@@ -929,7 +943,7 @@ export class FeishuRuntime {
     signal?.throwIfAborted();
     const response = await client.im.v1.message.reply({
       path: { message_id: route.messageId },
-      data: { msg_type: 'text', content: JSON.stringify({ text }), reply_in_thread: Boolean(route.threadId) },
+      data: { ...textMessage(text, checkedTextFormat(text)), reply_in_thread: Boolean(route.threadId) },
     });
     const messageId = response?.data?.message_id;
     if (response?.code || typeof messageId !== 'string' || !messageId)
