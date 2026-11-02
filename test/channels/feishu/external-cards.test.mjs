@@ -47,7 +47,7 @@ test('exact rule preview and nonce-bound confirmation remain separate from ordin
   confirmed.action.value = { namespace: 'botharness/approval-v1', requestId, action: 'confirm-exact', confirmationId };
   assert.throws(() => normalizeExternalCardAction(confirmed, identity), { code: 'invalid-inbound' });
   confirmed.action.value.namespace = 'botharness/question-v1';
-  assert.equal(normalizeExternalCardAction(confirmed, identity), null);
+  assert.throws(() => normalizeExternalCardAction(confirmed, identity), { code: 'bad-request' });
   assert.throws(() => externalApprovalCard({ ...card, rules: ['all-opaque'] }), { code: 'bad-request' });
   assert.throws(() => externalApprovalCard({ ...card, ruleConfirmation: { id: 'forged', kind: 'exact' } }), { code: 'bad-request' });
   assert.equal(JSON.parse(externalApprovalCard({ ...card, ruleConfirmation: { id: confirmationId, kind: 'exact' }, status: 'executed' })).elements.length, 1);
