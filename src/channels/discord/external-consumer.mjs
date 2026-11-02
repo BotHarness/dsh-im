@@ -87,7 +87,9 @@ export async function inspectDiscordSourceChannel(api, channelId, account, signa
     if (forReply && member.communication_disabled_until && Date.parse(member.communication_disabled_until) > Date.now())
       throw discordRefusal('reply-permission-denied');
     signal?.throwIfAborted();
-    return { guildId: guild.id, conversationId: parent.id, channelId: channel.id,
+    const name = [guild.name, parent.name].every(value => typeof value === 'string' && value.trim())
+      ? `${guild.name.trim()} #${parent.name.trim()}`.slice(0, 512) : undefined;
+    return { guildId: guild.id, conversationId: parent.id, channelId: channel.id, ...(name ? { name } : {}),
       ...(isThread ? { threadId: channel.id } : {}) };
   } catch (error) { throw nativeFailure(error, 'source-not-found'); }
 }
@@ -105,7 +107,7 @@ export function discordMessageContentAllowed(application) {
 }
 
 export function normalizeDiscordExternalText(message, { botId, account, channel, eventId, ordinaryText = false }) {
-  return normalizeDiscordHumanText(message, { botId, account, channel, eventId }, ordinaryText !== true);
+  return normalizeDiscordHumanText(message, { botId, account, channel, eventId }, ordinaryText !== true, true);
 }
 
 /** History visibility never relaxes the mention-only live admission predicate. */
@@ -113,15 +115,15 @@ export function normalizeDiscordHistoryText(message, identity) {
   return normalizeDiscordHumanText(message, identity, false);
 }
 
-function normalizeDiscordHumanText(message, { botId, account, channel, eventId }, requireMention) {
+function normalizeDiscordHumanText(message, { botId, account, channel, eventId }, requireMention, allowBots = false) {
   if (!discordSnowflake(message?.id) || !discordSnowflake(message?.author?.id)
-    || message.author.bot === true || message.webhook_id || message.author.id === account.userId
+    || (message.author.bot === true && !allowBots) || message.webhook_id || message.author.id === account.userId
     || ![0, 19].includes(message.type) || typeof message.content !== 'string' || !message.content.trim()
     || message.content.length > 16000 || !Array.isArray(message.mentions)) return null;
   if (message.guild_id !== channel.guildId || message.channel_id !== channel.channelId)
     throw discordRefusal('stale-route');
   const mentionedAccount = message.mentions.some(user => user.id === account.userId);
-  if (requireMention && !mentionedAccount) return null;
+  if ((requireMention || message.author.bot === true) && !mentionedAccount) return null;
   const timestamp = Date.parse(message.timestamp);
   if (!Number.isFinite(timestamp) || typeof eventId !== 'string' || !eventId || eventId.length > 512)
     throw discordRefusal('invalid-inbound');
@@ -131,8 +133,8 @@ function normalizeDiscordHumanText(message, { botId, account, channel, eventId }
     .map(user => ({ id: user.id, key: `<@${user.id}>`,
       ...(user.id === account.userId ? { name: account.name } : {}) }));
   return { version: 1, channel: 'discord', botId, fingerprint: account.fingerprint,
-    eventId, messageId: message.id, actor: { kind: 'user', id: message.author.id, ...(name ? { name: name.slice(0, 512) } : {}) },
-    conversation: { kind: 'group', id: channel.conversationId }, mentions, mentionedAccount,
+    eventId, messageId: message.id, actor: { kind: message.author.bot === true ? 'bot' : 'user', id: message.author.id, ...(name ? { name: name.slice(0, 512) } : {}) },
+    conversation: { kind: 'group', id: channel.conversationId, ...(channel.name ? { name: channel.name } : {}) }, mentions, mentionedAccount,
     at: new Date(timestamp).toISOString(), text: message.content,
     reply: { messageId: message.id, conversationId: channel.conversationId, actorId: message.author.id,
       ...(channel.threadId ? { threadId: channel.threadId } : {}) },
@@ -151,28 +153,41 @@ export async function qualifyDiscordReply(api, account, route, signal, permissio
   try { source = await api.getMessage({ channelId: channel.channelId, messageId: route.messageId, signal }); }
   catch (error) { throw nativeFailure(error, 'source-not-found'); }
   if (source?.id !== route.messageId || source.channel_id !== channel.channelId
-    || source.author?.id !== route.actorId || source.author.bot === true || source.webhook_id
+    || source.author?.id !== route.actorId || source.author.id === account.userId || source.webhook_id
     || ![0, 19].includes(source.type)) throw discordRefusal('stale-route');
   signal?.throwIfAborted();
   return { channel, route: { ...route }, source };
 }
 
-export async function sendDiscordReply(api, account, route, text, { signal, beforeSend, assertCurrent = () => {}, receipt = false } = {}) {
+/** Only the source author or people the source message mentions may be pinged back. */
+export function discordReplyMentions(mentionUserIds, route, source) {
+  if (mentionUserIds === undefined) return [];
+  if (!Array.isArray(mentionUserIds) || mentionUserIds.length > 20
+    || !mentionUserIds.every(discordSnowflake)) throw discordRefusal('bad-request');
+  const allowed = new Set([route.actorId, ...(Array.isArray(source?.mentions) ? source.mentions.map(user => user?.id) : [])]);
+  if (!mentionUserIds.every(id => allowed.has(id))) throw discordRefusal('bad-request');
+  return [...new Set(mentionUserIds)];
+}
+
+export async function sendDiscordReply(api, account, route, text, { signal, beforeSend, assertCurrent = () => {}, receipt = false, mentionUserIds } = {}) {
   if (typeof text !== 'string' || !text.trim() || text.length > 2000) throw discordRefusal('bad-request');
   const checked = await qualifyDiscordReply(api, account, route, signal);
+  const mentions = discordReplyMentions(mentionUserIds, route, checked.source);
+  if (mentions.length * 23 + text.length > 2000) throw discordRefusal('bad-request');
   signal?.throwIfAborted();
   assertCurrent();
   if (beforeSend && beforeSend() !== true) throw discordRefusal('stale-route');
   signal?.throwIfAborted();
-  return sendDiscordCheckedText(api, account, checked.channel, text, { signal, receipt, replyToMessageId: route.messageId });
+  return sendDiscordCheckedText(api, account, checked.channel, text, { signal, receipt, replyToMessageId: route.messageId,
+    ...(mentions.length ? { mentionUserIds: mentions } : {}) });
 }
 
-export async function sendDiscordCheckedText(api, account, channel, text, { signal, receipt = false, replyToMessageId } = {}) {
+export async function sendDiscordCheckedText(api, account, channel, text, { signal, receipt = false, replyToMessageId, mentionUserIds } = {}) {
   if (typeof text !== 'string' || !text.trim() || text.length > 2000) throw discordRefusal('bad-request');
   let sent;
   try {
     sent = await api.createMessage({ channelId: channel.channelId, content: text,
-      replyToMessageId, signal, retry: false, failIfNotExists: true });
+      replyToMessageId, ...(mentionUserIds ? { mentionUserIds } : {}), signal, retry: false, failIfNotExists: true });
   } catch (error) {
     if ([400, 401, 403, 404, 429].includes(error?.status)) throw discordRefusal('reply-permission-denied');
     throw discordRefusal('reply-result-unknown');

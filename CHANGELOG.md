@@ -6,7 +6,56 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ## [Unreleased]
 
+### Fixed / 修复
+
+- 飞书受校验的 Bot 回复（回复原消息与发到群聊）使用 Markdown 时，改用与聊天相同的原生 Markdown 卡片发送，加粗、标题、列表、表格不再以星号、井号、竖线原样显示；纯文本和带 `<at user_id>` 提及的回复仍按文本发送，保持其他 Bot 的提及接收与自身 Echo 确认不变（[BotHarness #2792](https://github.com/BotHarness/DeepSeekBot/issues/2792)）。
+  Checked Lark Bot replies, both replies to the source message and posts to a group, are sent as the same native Markdown card as chat when they use Markdown, so bold, headings, lists and tables no longer show as raw asterisks, hashes and pipes. Plain replies and replies carrying a `<at user_id>` mention stay text, so other Bots still receive the mention and own Echo confirmation is unchanged ([BotHarness #2792](https://github.com/BotHarness/DeepSeekBot/issues/2792)).
+
+- 兼容 DSH 0.2.1 Typert Gateway：dsh-im 在每次调用时声明本机 owner Peer，修复只能收消息、无法创建会话并报 `INTERNAL_UNKNOWN` 的问题；Gateway 协议错误现在归类为 Harness 接口不兼容（[BotHarness #2896](https://github.com/BotHarness/DeepSeekBot/issues/2896)）。
+  Supports the DSH 0.2.1 Typert Gateway: dsh-im names the local owner Peer on every call, fixing bots that received messages but could not create a session (`INTERNAL_UNKNOWN`). Gateway contract failures now classify as a Harness interface mismatch ([BotHarness #2896](https://github.com/BotHarness/DeepSeekBot/issues/2896)).
+
+- QQ 独占 Consumer 不再丢弃引用、图片和图文混合消息：引用文字、引用图片、引用图文都会带上 `[Quoted message]` 与被引用内容，已开启的图片和文件能力会一并附上被引用的附件；读不了的附件（如视频、未开启的语音）改为在正文里注明而不是丢掉整条消息；只 @ 不带文字也会送达；兼容 `image/jpg`、按文件名识别的图片和缺少协议或使用 HTTP 的 QQ 媒体地址，图片实际格式与声明不一致时只要是支持的格式也能读取（[BotHarness #2895](https://github.com/BotHarness/DeepSeekBot/issues/2895)）。
+  QQ exclusive Consumers no longer drop quoted, image or mixed messages. Quoted text, images and text-with-image all arrive under a `[Quoted message]` marker, and quoted attachments are attached when the image or file capability is on. Attachments the Consumer cannot read, such as video or voice without its opt-in, are named in the text instead of dropping the whole message, and an @ with no text still arrives. `image/jpg`, file-name image types and scheme-less or HTTP QQ media URLs are accepted, and an image whose real format differs from its declared type is read when the real format is supported ([BotHarness #2895](https://github.com/BotHarness/DeepSeekBot/issues/2895)).
+
+- QQ 同一群的受校验回复按顺序发送，遇到 429 限流时退避重试两次，被拒绝的发送不占用被动回复额度（[BotHarness #2897](https://github.com/BotHarness/DeepSeekBot/issues/2897)）。
+  Checked QQ replies to one group are sent in order, and a rate-limited reply is retried twice with backoff without spending the passive reply budget ([BotHarness #2897](https://github.com/BotHarness/DeepSeekBot/issues/2897)).
+
+- QQ 延迟交付在被动回复窗口内（私聊 60 分钟、群 5 分钟）沿用原消息 `msg_id` 回复，避免超时后生成的结果因主动消息受限而无法送达（[BotHarness #2868](https://github.com/BotHarness/DeepSeekBot/issues/2868)）。
+  QQ deferred delivery replies to the original `msg_id` while the passive window is open (60 min for C2C, 5 min for groups), so results produced after a timeout are no longer lost to proactive-message limits ([BotHarness #2868](https://github.com/BotHarness/DeepSeekBot/issues/2868)).
+
+- QQ 独占 Consumer 保留原生提及的名称、ID 和精确正文 token，供现有外部提及块展示；仅接收应用的严格 `is_you` 提及可使用已认证应用名称补全，歧义标识不猜测，不改变正文、收件或 Echo 资格（[BotHarness #1156](https://github.com/BotHarness/DeepSeekBot/issues/1156)）。
+  QQ exclusive Consumers retain native mention names, IDs and exact body tokens for the existing external mention chips. Only a strict receiving-App `is_you` mention can use its authenticated application name as fallback; ambiguous identifiers are not guessed, and source text, intake and Echo qualification remain unchanged ([BotHarness #1156](https://github.com/BotHarness/DeepSeekBot/issues/1156)).
+
+- QQ 的独占外部 Consumer 在全量事件中继续接收顶层 `is_you === true` 的 Human @，文字、引用文件与引用语音沿用相同提及校验，拒绝普通消息、其他 App 的提及、引用中的提及及机器人发送者；不启用普通采集或宣称自身 Echo 已验收（[BotHarness #1156](https://github.com/BotHarness/DeepSeekBot/issues/1156)）。
+  QQ exclusive external Consumers retain Human self mentions with top-level `is_you === true` in full-mode events, including checked quoted files and voice, while refusing ordinary messages, foreign/quoted mentions and Bot authors; this does not enable ordinary collection or qualify own Echo ([BotHarness #1156](https://github.com/BotHarness/DeepSeekBot/issues/1156)).
+
 ### Added / 新增
+
+- QQ 独占 Consumer 支持私聊：Consumer 声明 `directMessages` 后，私聊消息以 `dm` 会话进入，文字、图片、文件、引用和语音与群聊走同一套处理；回复按私聊被动回复规则发送（60 分钟、4 条）。新增能力 `direct-message-consumer`。
+  QQ exclusive Consumers support private chats. When a Consumer opts into `directMessages`, private messages arrive as `dm` conversations and get the same text, image, file, quote and voice handling as groups. Replies follow QQ's private passive reply rules (60 minutes, four replies). Adds the `direct-message-consumer` capability.
+
+- 飞书/Lark 与 Discord 独占外部 Consumer 接收其他 Bot 在群里明确 @ 本账号的文字消息，以 `actor.kind: 'bot'` 交给 Host，并允许在该消息上做受校验的回复；没有 @ 本账号的 Bot 消息、私聊里的 Bot 消息、自身消息和 Discord webhook 仍被排除。需要接受 Bot 发送者的 BotHarness Host（[BotHarness #2872](https://github.com/BotHarness/DeepSeekBot/issues/2872)）。
+  Lark and Discord exclusive external Consumers accept text from another Bot that explicitly mentions this account in a group, hand it to the Host as `actor.kind: 'bot'`, and allow a checked reply on that message. Bot messages without a mention of this account, Bot messages in direct chats, own messages and Discord webhooks are still excluded. Requires a BotHarness Host that accepts Bot senders ([BotHarness #2872](https://github.com/BotHarness/DeepSeekBot/issues/2872)).
+
+- 本次 #1115 候选补齐 Discord/Slack 可达群查询与首次发帖，保留旧目标的发送前授权检查，并恢复同一 Provider 中的 Lark/微信设置流程；尚未发布，不替代原生验收或已发布 pin。
+  This #1115 candidate adds Discord/Slack reachable-group discovery and first posting, preserves final authorization for saved targets, and restores Lark/WeChat setup in the same Provider. It is unreleased and does not substitute for native qualification or the published pin.
+
+- Feishu/Lark 增加可选可达群查询与受校验的首次发帖能力：重新检查群成员和发言权限、发送前授权以及原生回执；当前为未发布主线候选，新的运行时验收仍待完成（[BotHarness #1115](https://github.com/BotHarness/DeepSeekBot/issues/1115), [contract](docs/checked-reachable-conversations.md)）。
+  Feishu/Lark adds optional reachable-group discovery and checked first posting with fresh membership/speaking permission, final authorization and exact native receipts. This main-line candidate is unreleased and awaits fresh runtime qualification ([BotHarness #1115](https://github.com/BotHarness/DeepSeekBot/issues/1115), [contract](docs/checked-reachable-conversations.md)).
+
+- 可选 `reactionVersion: 1` checked Service 在原消息上写入 `GLANCE`／`DONE`，重查账户、来源和授权，失败不自动重试；真实平台权限与样式待新 Human QA 窗口确认，不改变已发布 pin（[BotHarness #1040](https://github.com/BotHarness/BotHarness/issues/1040), [contract](docs/checked-lark-reactions.md)）。
+  An optional checked reaction Service writes native `GLANCE` / `DONE` on the original message after account, source and authorization checks, without automatic retry; live permission and rendering qualification remain pending a fresh Human QA window ([BotHarness #1040](https://github.com/BotHarness/BotHarness/issues/1040), [contract](docs/checked-lark-reactions.md)).
+- QQ 的独占外部 Consumer 新增有界原生回调／发送回执诊断，记录事件类型、作者资格判断及白名单标识字段的哈希与长度，便于区分回调缺失、作者筛选和标识命名空间差异；不记录正文、原始标识或凭据，不改变收件及回复资格，也不声明 Echo 能力（[BotHarness #1156](https://github.com/BotHarness/DeepSeekBot/issues/1156)）。
+  QQ exclusive external Consumers add bounded native callback/receipt diagnostics with event types, author qualification checks and hashes/lengths of fixed identifier fields to distinguish missing callbacks, author filtering and identifier namespace differences; no bodies, raw identifiers or credentials are logged, intake/reply qualification remains unchanged, and Echo capability is not advertised ([BotHarness #1156](https://github.com/BotHarness/DeepSeekBot/issues/1156)).
+
+- Lark checked 外部卡片新增独立的配对审核 namespace、角色选择与批准／拒绝，支持经原消息校验的群卡片与私聊卡片，共享更新会移除结束后的控件；沿用独占 Consumer，原生执行审批仍保持私聊限制。BotHarness Host 负责实时审核与委派权限，本候选真实 Lark 验收待完成（[BotHarness #1414](https://github.com/BotHarness/DeepSeekBot/issues/1414)）。
+  Lark checked external cards add a separate pairing-review namespace, Role selection and approve/reject controls for source-checked group and private cards, with final shared updates removing controls. The exclusive Consumer is retained and native execution approvals remain private. BotHarness Host owns current review/delegation checks; this candidate still awaits real Lark qualification ([BotHarness #1414](https://github.com/BotHarness/DeepSeekBot/issues/1414)).
+
+- Slack 的 checked external consumer 接收发给 App 的 Human 私聊（`conversation.kind: 'dm'`），私聊回复不再开 thread；Slack 与 Discord 的 checked 回复新增 `mentionUserIds`，只能 @ 原消息作者或原消息里 @ 过的人，并声明 `reply-mention-checked`；Slack 收件时用 `users.info` 补全被 @ 的人名（[BotHarness #1125](https://github.com/BotHarness/BotHarness/issues/1125)、[#1126](https://github.com/BotHarness/BotHarness/issues/1126)）。
+  Slack checked external consumers accept Human DMs to the App (`conversation.kind: 'dm'`) and answer them without a thread. Slack and Discord checked replies accept `mentionUserIds`, limited to the source author and people the source mentions; matching inline `<@ID>` tags stay in place and missing ones are prefixed, and advertise `reply-mention-checked`. Slack intake names mentioned people through `users.info` ([BotHarness #1125](https://github.com/BotHarness/BotHarness/issues/1125), [#1126](https://github.com/BotHarness/BotHarness/issues/1126)).
+
+- 微信增加可选的独占扫码绑定者文本私聊 consumer，提交接收后才推进同步游标；回复仅使用该账号私有的原消息 continuation，回执明确区分客户端确认编号与服务端消息 ID。此扩展仍未发布。
+  WeChat adds an optional exclusive paired-owner text-DM consumer whose sync cursor advances after committed intake; replies use the account-private original-message continuation and distinguish acknowledged client identifiers from server message IDs. This extension remains unreleased.
 
 - Discord 的 checked external consumer 增加有界频道／已有公开 Thread Human 文本历史读取：核对原生 App 正文可见性、来源和权限，使用账号／来源／查询绑定的签名 cursor；普通 @ 收件条件不变，本候选未发布（[BotHarness #937](https://github.com/BotHarness/BotHarness/issues/937)）。
   Discord checked external consumers add bounded channel/existing-public-thread Human-text history, with native App content visibility, source and permission checks plus signed account/source/query-bound continuations. Mention-only intake stays unchanged; this candidate is unreleased ([BotHarness #937](https://github.com/BotHarness/BotHarness/issues/937)).
@@ -20,6 +69,11 @@ This file records the notable changes in each dsh-im release. Its format follows
   The same-Host public `dshIm` Service adds versioned account descriptions and checked plain-text sends. Feishu/Lark account identity is authenticated against the platform, destinations are checked against a frozen content digest, legacy `send` remains compatible, and unsupported channels return an explicit error.
 
 ### Fixed / 修复
+
+- checked Lark reaction 将 SDK HTTP 异常中的明确权限拒绝归为失败，保持未知传输结果与不重试约束；首个真实窗口确认权限缺失，样式仍未合格。
+  Checked Lark reactions classify explicit permission denials in SDK HTTP exceptions as failures, retaining unknown transport outcomes and no-retry behavior; the first live window found missing permission and did not qualify rendering.
+- Feishu/Lark 的 checked 工具审批卡片在创建和后续更新时启用共享更新模式，避免服务端已结算但接收者仍看到等待文字与旧按钮；审核权限与原生决定不变（[BotHarness #1406](https://github.com/BotHarness/DeepSeekBot/issues/1406)）。
+  Feishu/Lark checked tool-approval cards enable shared updates on both creation and later patches so receivers see settled status without stale approval buttons. Authorization and native decisions are unchanged ([BotHarness #1406](https://github.com/BotHarness/DeepSeekBot/issues/1406)).
 
 - Feishu/Lark 独占外部文本接收在原消息、发送人和话题路由核验后补充原生发送人名称；可选名称读取最多等待 1.5 秒，权限缺失、名称缺失或查询失败保留 ID 回退和原收件行为，取消或连接替换仍拒绝过期交付。此候选修复未发布，真实 BotHarness 验收单独记录于 BotHarness/BotHarness#1070。
   Feishu/Lark exclusive external text intake enriches the native sender name after checking the exact message, sender and topic route. Optional reads wait at most 1.5 seconds; unavailable permissions, names or lookups preserve ID fallback and intake, while cancellation or connection replacement still refuses stale delivery. This candidate fix is unreleased; real BotHarness qualification is tracked separately in BotHarness/BotHarness#1070.
