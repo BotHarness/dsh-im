@@ -19,17 +19,19 @@ export async function checkedReplySource(client, route, signal) {
   return source;
 }
 
-async function parentResources(client, route, signal, { sourceVideos = false, sourceImages = false } = {}) {
+async function parentResources(client, route, signal, { sourceVideos = false, sourceImages = false, sourceVoiceAudio = false } = {}) {
   if (!route.parentId || route.parentId === route.messageId) return undefined;
   signal?.throwIfAborted();
   const result = await client.im.v1.message.get({ path: { message_id: route.parentId } });
   const file = result?.data?.items?.find(item => item.message_id === route.parentId);
   if (result?.code || !file || file.deleted === true || file.chat_id !== route.conversationId)
     throw failure('stale-route');
-  if (file.msg_type !== 'file' && !(sourceVideos && file.msg_type === 'media')) return undefined;
+  if (file.msg_type !== 'file' && !(sourceVideos && file.msg_type === 'media')
+    && !(sourceVoiceAudio && file.msg_type === 'audio')) return undefined;
   if (file.thread_id && route.threadId && file.thread_id !== route.threadId) throw failure('stale-route');
   let content;
   try { content = JSON.parse(file.body?.content); } catch { throw failure('invalid-inbound'); }
+  if (file.msg_type === 'audio') return parentAudio(route, file, content, signal);
   if (typeof content?.file_key !== 'string' || !content.file_key || content.file_key.length > 512
     || typeof content.file_name !== 'string' || !content.file_name || content.file_name.length > 512
     || (content.duration !== undefined && (!Number.isSafeInteger(content.duration) || content.duration < 0))
@@ -54,6 +56,21 @@ async function parentResources(client, route, signal, { sourceVideos = false, so
   });
 }
 
+function parentAudio(route, file, content, signal) {
+  if (typeof content?.file_key !== 'string' || !content.file_key || content.file_key.length > 512
+    || (content.duration !== undefined && (!Number.isSafeInteger(content.duration) || content.duration < 0)))
+    throw failure('invalid-inbound');
+  signal?.throwIfAborted();
+  const attachment = Object.freeze({
+    id: createHash('sha256').update(JSON.stringify([route.conversationId, file.message_id, content.file_key])).digest('hex'),
+    messageId: file.message_id, resourceKey: content.file_key, name: 'voice.opus', mediaType: 'audio/unknown',
+  });
+  return Object.freeze({ attachments: Object.freeze([attachment]), voice: Object.freeze({
+    transcript: 'unavailable', itemId: attachment.id,
+    ...(content.duration === undefined ? {} : { durationMs: content.duration }),
+  }) });
+}
+
 export async function externalAttachments(client, evidence, signal, options) {
   if (evidence.attachments?.length || !evidence.mentionedAccount || !evidence.reply.parentId) return evidence;
   const resources = await parentResources(client, evidence.reply, signal, options);
@@ -65,7 +82,7 @@ export async function readExternalFile(client, route, attachment, { signal, asse
   const ownImages = nativeImageContent(source, route.conversationId);
   const current = attachment.mediaType === 'image/unknown' && attachment.messageId === route.messageId
     ? ownImages?.attachments.find(item => item.id === attachment.id)
-    : (await parentResources(client, route, signal, { sourceVideos: true, sourceImages: true }))?.attachments.find(item => item.id === attachment.id);
+    : (await parentResources(client, route, signal, { sourceVideos: true, sourceImages: true, sourceVoiceAudio: true }))?.attachments.find(item => item.id === attachment.id);
   if (!current || JSON.stringify(current) !== JSON.stringify(attachment)) throw failure('stale-route');
   assertCurrent();
   const resource = await client.im.v1.messageResource.get({
