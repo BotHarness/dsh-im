@@ -48,6 +48,32 @@ test('native media metadata and its cover require explicit opt-in and remain bou
   await assert.rejects(externalAttachments(fx.client, input, context().signal, { sourceVideos: true }), { code: 'stale-route' });
 });
 
+test('native audio requires explicit voice-audio opt-in and stays bound to the exact parent', async () => {
+  const fx = fixture();
+  let audio = { ...parent, msg_type: 'audio', body: { content: JSON.stringify({ file_key: 'native-voice', duration: 3200 }) } };
+  fx.client.im.v1.message.get = async ({ path }) => ({ data: { items: [path.message_id === 'mention' ? source : audio] } });
+  const input = { mentionedAccount: true, reply: route };
+  assert.equal((await externalAttachments(fx.client, input, context().signal, { sourceVideos: true, sourceImages: true })).attachments, undefined);
+  assert.equal((await externalAttachments(fx.client, { ...input, mentionedAccount: false }, context().signal, { sourceVoiceAudio: true })).attachments, undefined);
+  const evidence = await externalAttachments(fx.client, input, context().signal, { sourceVoiceAudio: true });
+  assert.equal(fx.downloads, 0);
+  assert.equal(evidence.attachments.length, 1);
+  assert.deepEqual({ ...evidence.attachments[0], id: undefined }, { id: undefined, messageId: 'file', resourceKey: 'native-voice', name: 'voice.opus', mediaType: 'audio/unknown' });
+  assert.deepEqual(evidence.voice, { transcript: 'unavailable', itemId: evidence.attachments[0].id, durationMs: 3200 });
+  const stream = await readExternalFile(fx.client, route, evidence.attachments[0], context());
+  for await (const chunk of stream) void chunk;
+  assert.deepEqual(fx.calls[0], { path: { message_id: 'file', file_key: 'native-voice' }, params: { type: 'file' } });
+  audio = { ...audio, body: { content: JSON.stringify({ file_key: 'changed-voice', duration: 3200 }) } };
+  await assert.rejects(readExternalFile(fx.client, route, evidence.attachments[0], context()), { code: 'stale-route' });
+  assert.equal(fx.downloads, 1);
+  audio = { ...audio, body: { content: JSON.stringify({ file_key: 'native-voice', duration: -1 }) } };
+  await assert.rejects(externalAttachments(fx.client, input, context().signal, { sourceVoiceAudio: true }), { code: 'invalid-inbound' });
+  audio = { ...audio, body: { content: JSON.stringify({ file_key: 'native-voice' }) } };
+  assert.deepEqual((await externalAttachments(fx.client, input, context().signal, { sourceVoiceAudio: true })).voice, { transcript: 'unavailable', itemId: evidence.attachments[0].id });
+  audio = { ...audio, chat_id: 'other-chat' };
+  await assert.rejects(externalAttachments(fx.client, input, context().signal, { sourceVoiceAudio: true }), { code: 'stale-route' });
+});
+
 test('native media without optional duration or cover stays playable; a file named mp4 is still a file', async () => {
   const fx = fixture();
   let media = { ...parent, msg_type: 'media', body: { content: JSON.stringify({ file_key: 'native-video', file_name: 'clip.mp4' }) } };

@@ -1601,7 +1601,7 @@ test('releasing the exclusive consumer cancels a pending history read', async ()
 
 
 for (const sourceVideos of [false, true]) {
-  test(`video qualification opt-in reaches production enrichment (sourceVideos=${sourceVideos})`, async () => {
+  test(`media qualification opt-ins reach production enrichment (sourceVideos=${sourceVideos})`, async () => {
     const existing = bot('bot_media', 'media');
     const fx = fixture({ bots: [existing], secrets: { [existing.secretRef]: 'local-secret' },
       verifyApp: async () => ({ openId: existing.botOpenId, name: 'Verified' }) });
@@ -1609,8 +1609,9 @@ for (const sourceVideos of [false, true]) {
     try {
       const info = await fx.controller.describeDeliveryAccount(existing.id);
       assert.ok(info.capabilities.includes('source-video-checked'));
+      assert.ok(info.capabilities.includes('source-voice-audio-checked'));
       await fx.controller.consumeInbound(existing.id, { expectedFingerprint: info.account.fingerprint,
-        sourceFiles: true, sourceImages: true, sourceVideos, onEvent: async () => ({ accepted: true }) });
+        sourceFiles: true, sourceImages: true, sourceVideos, sourceVoiceAudio: !sourceVideos, onEvent: async () => ({ accepted: true }) });
       const runtime = fx.runtimes.get(existing.id).at(-1);
       let options;
       runtime.enrichExternal = async (evidence, value) => { options = value; return evidence; };
@@ -1621,6 +1622,7 @@ for (const sourceVideos of [false, true]) {
           create_time: '1790787600000', content: JSON.stringify({ text: '@_user_1 inspect video' }) } });
       assert.equal(options.sourceVideos, sourceVideos);
       assert.equal(options.sourceImages, true);
+      assert.equal(options.sourceVoiceAudio, !sourceVideos);
     } finally {
       await fx.controller.close();
     }

@@ -904,10 +904,10 @@ export class FeishuRuntime {
     return result;
   }
 
-  async enrichExternal(evidence, { signal, sourceVideos = false, sourceImages = false } = {}) {
+  async enrichExternal(evidence, { signal, sourceVideos = false, sourceImages = false, sourceVoiceAudio = false } = {}) {
     const client = this.#client;
     if (!client || this.#consumerMode !== 'external-consumer') throw Object.assign(new Error('bot-not-connected'), { code: 'bot-not-connected' });
-    const result = await externalAttachments(client, evidence, signal, { sourceVideos, sourceImages });
+    const result = await externalAttachments(client, evidence, signal, { sourceVideos, sourceImages, sourceVoiceAudio });
     signal?.throwIfAborted();
     if (this.#client !== client) throw Object.assign(new Error('bot-not-connected'), { code: 'bot-not-connected' });
     return result;
