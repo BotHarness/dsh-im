@@ -818,7 +818,11 @@ export class FeishuRuntime {
       error.code = 'bad-request';
       throw error;
     }
-    if (typeof receipt !== 'boolean' || (receipt && target.kind !== 'group'))
+    // A receipt proves the exact conversation: a group chat, or the private
+    // chat a saved user target names alongside its open_id.
+    const receiptConversation = target.kind === 'group' ? receiveId
+      : nonEmptyString(target?.route?.chatId);
+    if (typeof receipt !== 'boolean' || (receipt && !receiptConversation))
       throw Object.assign(new Error('capability-unavailable'), { code: 'capability-unavailable' });
     signal?.throwIfAborted();
     // Use the same native Markdown element as chat, without opening a stream
@@ -846,7 +850,7 @@ export class FeishuRuntime {
     if (!receipt) return { sent: true };
     const messageId = response?.data?.message_id;
     const conversationId = response?.data?.chat_id;
-    if (typeof messageId !== 'string' || !messageId || messageId.length > 512 || conversationId !== receiveId)
+    if (typeof messageId !== 'string' || !messageId || messageId.length > 512 || conversationId !== receiptConversation)
       throw Object.assign(new Error('send-result-unknown'), { code: 'send-result-unknown' });
     return { sent: true, receipt: { version: 1, messageId, conversationId } };
   }
