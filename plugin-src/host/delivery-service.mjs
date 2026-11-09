@@ -613,7 +613,8 @@ export class DeliveryService {
         throw deliveryError('capability-unavailable');
       }
       if (account.account?.fingerprint !== expectedFingerprint) throw deliveryError('account-changed');
-      const receiptConversation = adapter.channel === 'feishu' && target.kind === 'group'
+      const receiptConversation = adapter.channel === 'feishu'
+        && (target.kind === 'group' || typeof target.route.chatId === 'string')
         ? target.route.chatId : adapter.channel === 'slack' && target.kind === 'conversation'
           ? target.route.channelId : adapter.channel === 'qq' && target.kind === 'group'
             ? target.route.groupOpenId : adapter.channel === 'weixin' && target.kind === 'user'

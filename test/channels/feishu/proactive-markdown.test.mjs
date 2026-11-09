@@ -138,3 +138,19 @@ test('opt-in group receipt survives runtime and adapter without changing legacy 
   await assert.rejects(fx.runtime.sendProactiveText(targets[0], text, { receipt: true }), { code: 'capability-unavailable' });
   assert.equal(fx.sends.length, before);
 });
+
+test('a saved private-chat target returns a checked receipt for its exact chat (#3842)', async t => {
+  const fx = await fixture(t);
+  const privateChat = { targetId: 'owner-dm', kind: 'user', route: { openId: 'ou_fixture_owner', chatId: 'oc_fixtureowner' } };
+  targets.push(privateChat);
+  t.after(() => targets.splice(targets.indexOf(privateChat), 1));
+  fx.respondWith(() => ({ code: 0, data: { message_id: 'om_dm_receipt', chat_id: 'oc_fixtureowner' } }));
+  assert.deepEqual(await fx.runtime.sendProactiveText(privateChat, text, { receipt: true }), {
+    sent: true, receipt: { version: 1, messageId: 'om_dm_receipt', conversationId: 'oc_fixtureowner' },
+  });
+  const sent = fx.sends.at(-1);
+  assert.equal(sent.params.receive_id_type, 'open_id');
+  assert.equal(sent.data.receive_id, 'ou_fixture_owner');
+  fx.respondWith(() => ({ code: 0, data: { message_id: 'om_dm_receipt', chat_id: 'oc_other' } }));
+  await assert.rejects(fx.runtime.sendProactiveText(privateChat, text, { receipt: true }), { code: 'send-result-unknown' });
+});

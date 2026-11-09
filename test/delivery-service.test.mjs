@@ -393,6 +393,32 @@ test('Weixin checked post requires a current final fence and keeps client acknow
   assert.equal(sends, 1);
 });
 
+test('Feishu checked post receipts a saved private chat by its chat id, never an open_id-only user (#3842)', async () => {
+  const fx = checkedFixture();
+  fx.adapter.describeAccount = async () => ({version: 1, capabilities: ['proactive-text-checked', 'proactive-receipt-checked', 'proactive-fence-checked'], account: {fingerprint: fx.fingerprint}});
+  fx.service.registerAdapter(fx.adapter);
+  const {createHash} = await import('node:crypto');
+  const digest = (target) => createHash('sha256').update(JSON.stringify({kind: target.kind,
+    route: Object.fromEntries(Object.entries(target.route).sort(([a], [b]) => a < b ? -1 : 1))})).digest('hex');
+  const privateChat = {targetId: 'owner-dm', kind: 'user', route: {openId: 'ou_owner', chatId: 'oc_ownerdm'}};
+  const openIdOnly = {targetId: 'owner-open-id', kind: 'user', route: {openId: 'ou_owner'}};
+  await fx.service.createTarget('bot_one', privateChat);
+  await fx.service.createTarget('bot_one', openIdOnly);
+  let sends = 0;
+  fx.adapter.sendText = async (_id, saved, _text, opts) => {
+    assert.equal(opts.receipt, true);
+    if (!opts.beforeSend()) throw Object.assign(new Error('cancelled'), {code: 'cancelled'});
+    sends++;
+    return {sent: true, receipt: {version: 1, messageId: 'om_dm', conversationId: saved.route.chatId}};
+  };
+  const options = {expectedFingerprint: fx.fingerprint, receipt: true, beforeSend: () => true};
+  assert.deepEqual(await fx.service.sendChecked('bot_one', 'owner-dm', 'Report', {...options, expectedTargetDigest: digest(privateChat)}),
+    {sent: true, receipt: {version: 1, messageId: 'om_dm', conversationId: 'oc_ownerdm'}});
+  await assert.rejects(fx.service.sendChecked('bot_one', 'owner-open-id', 'Report', {...options, expectedTargetDigest: digest(openIdOnly)}),
+    {code: 'capability-unavailable'});
+  assert.equal(sends, 1);
+});
+
 async function checkedTarget(fx) {
   const target = {targetId: 'self', kind: 'user', route: {openId: 'ou_self'}};
   await fx.service.createTarget('bot_one', target);
