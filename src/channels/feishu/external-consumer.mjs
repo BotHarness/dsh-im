@@ -17,7 +17,15 @@ export function normalizeExternalText(event, { botId, appId, botOpenId, fingerpr
   const conversationId = identifier(message?.chat_id);
   const eventId = identifier(event?.event_id ?? event?.header?.event_id);
   const eventApp = event?.app_id ?? event?.header?.app_id;
-  if (eventApp !== undefined && eventApp !== appId) throw refusal('account-changed');
+  if (eventApp !== undefined && eventApp !== appId
+    || event?.header?.app_id !== undefined && event.header.app_id !== appId) throw refusal('account-changed');
+  const tenant = event?.tenant_key ?? event?.header?.tenant_key;
+  const tenantId = identifier(tenant);
+  if (tenant !== undefined && !tenantId
+    || event?.tenant_key !== undefined && event?.header?.tenant_key !== undefined
+      && event.tenant_key !== event.header.tenant_key
+    || tenantId && event?.sender?.tenant_key !== undefined && event.sender.tenant_key !== tenantId)
+    throw refusal('invalid-inbound');
   const botSender = isBotSenderType(event?.sender);
   if (botSender && (message?.chat_type !== 'group' || !identifier(botOpenId) || !actorId || actorId === botOpenId
     || event?.sender?.sender_id?.app_id === appId)) return null;
@@ -27,13 +35,27 @@ export function normalizeExternalText(event, { botId, appId, botOpenId, fingerpr
   if (message.mentions !== undefined && (!Array.isArray(message.mentions) || message.mentions.length > 100))
     throw refusal('invalid-inbound');
   const mentions = Object.freeze((message.mentions ?? []).map(mention => {
-    const id = identifier(mention?.id?.open_id ?? mention?.open_id);
+    const idType = mention?.id_type ?? 'open_id';
+    const id = identifier(idType === 'app_id' ? mention?.id?.app_id
+      : mention?.id?.open_id ?? mention?.open_id);
     const key = identifier(mention?.key);
-    if (!id || !key) throw refusal('invalid-inbound');
+    if (!id || !key || !['open_id', 'app_id'].includes(idType))
+      throw refusal('invalid-inbound');
     const name = identifier(mention?.name);
-    return Object.freeze({ id, key, ...(name ? { name } : {}) });
+    const mentionTenant = identifier(mention?.tenant_key);
+    const type = mention?.mentioned_type;
+    if (mention?.tenant_key !== undefined && !mentionTenant
+      || type !== undefined && !identifier(type)
+      || idType === 'app_id' && type === 'user') throw refusal('invalid-inbound');
+    return Object.freeze({ id, key, ...(name ? { name } : {}),
+      ...(mention?.id_type === undefined ? {} : { idType }),
+      ...(mentionTenant ? { tenantId: mentionTenant } : {}),
+      ...(type === undefined ? {} : { mentionedType: type }),
+      ...(idType === 'app_id' ? { kind: 'bot' }
+        : ['user', 'bot', 'app'].includes(type) ? { kind: type === 'user' ? 'user' : 'bot' } : {}) });
   }));
-  if (botSender && !mentions.some(mention => mention.id === botOpenId)) return null;
+  const mentionedAccount = mentions.some(mention => mention.id === (mention.idType === 'app_id' ? appId : botOpenId));
+  if (botSender && !mentionedAccount) return null;
   if (!actorId || !messageId || !conversationId || !eventId
     || !/^[a-f0-9]{64}$/.test(fingerprint ?? '')) throw refusal('invalid-inbound');
   let text;
@@ -50,11 +72,12 @@ export function normalizeExternalText(event, { botId, appId, botOpenId, fingerpr
     ...(identifier(message.parent_id) ? { parentId: message.parent_id } : {}),
   });
   return Object.freeze({
-    version: 1, channel: 'feishu', botId, fingerprint, eventId, messageId,
+    version: 1, channel: 'feishu', botId, fingerprint, appId, eventId, messageId,
+    ...(tenantId ? { tenantId } : {}),
     actor: Object.freeze({ kind: botSender ? 'bot' : 'user', id: actorId,
       ...(identifier(event.sender.sender_name) ? { name: event.sender.sender_name } : {}) }),
     conversation: Object.freeze({ kind: message.chat_type === 'group' ? 'group' : 'dm', id: conversationId }),
-    mentions, mentionedAccount: mentions.some(mention => mention.id === botOpenId),
+    mentions, mentionedAccount,
     at: timestamp.toISOString(), text, reply: route,
     replay: Object.freeze({ kind: 'provider-redelivery', resumeCursor: false, gapPossible: true }),
   });

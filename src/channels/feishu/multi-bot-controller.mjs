@@ -633,27 +633,32 @@ export class MultiBotDshFeishuController {
 
   async historyChecked(botId, route, query, { expectedFingerprint, signal } = {}) {
     this.#assertOpen('capability-unavailable');
-    return this.#withBotTransition(botId, async () => {
+    // Read-only inspection can run inside the external consumer's acceptance.
+    // Capture its current owner rather than queue behind that same callback.
+    const config = this.#requireBot(botId), runtime = this.#runtimes.get(botId);
+    const original = configuredBotFingerprint(config);
+    const assertCurrent = () => {
       this.#assertOpen('capability-unavailable');
-      signal?.throwIfAborted();
-      const config = this.#requireBot(botId);
-      const account = await this.#deliveryAccount(config);
-      this.#assertOpen('capability-unavailable');
-      signal?.throwIfAborted();
-      if (account.fingerprint !== expectedFingerprint)
+      if (this.#runtimes.get(botId) !== runtime
+        || configuredBotFingerprint(this.#requireBot(botId)) !== original)
         throw Object.assign(new Error('account-changed'), { code: 'account-changed' });
-      const runtime = this.#runtimes.get(botId);
       if (config.consumerMode !== 'external-consumer' || !isConnected(connectionStatus(runtime))
         || typeof runtime.historyChecked !== 'function')
         throw Object.assign(new Error('capability-unavailable'), { code: 'capability-unavailable' });
-      const leaseSignal = this.#inboundConsumers.signalFor(botId, expectedFingerprint);
-      const readSignal = signal ? AbortSignal.any([signal, leaseSignal]) : leaseSignal;
-      const result = await runtime.historyChecked({ botId, appId: config.appId,
-        botOpenId: config.botOpenId, fingerprint: account.fingerprint }, route, query, { signal: readSignal });
-      this.#assertOpen('capability-unavailable');
-      readSignal.throwIfAborted();
-      return result;
-    });
+    };
+    signal?.throwIfAborted();
+    const account = await this.#deliveryAccount(config);
+    assertCurrent();
+    signal?.throwIfAborted();
+    if (account.fingerprint !== expectedFingerprint)
+      throw Object.assign(new Error('account-changed'), { code: 'account-changed' });
+    const leaseSignal = this.#inboundConsumers.signalFor(botId, expectedFingerprint);
+    const readSignal = signal ? AbortSignal.any([signal, leaseSignal]) : leaseSignal;
+    const result = await runtime.historyChecked({ botId, appId: config.appId,
+      botOpenId: config.botOpenId, fingerprint: account.fingerprint }, route, query, { signal: readSignal });
+    assertCurrent();
+    readSignal.throwIfAborted();
+    return result;
   }
 
   async qualifyReplyChecked(botId, route, { expectedFingerprint, signal } = {}) {
