@@ -15,14 +15,16 @@ function check(response) {
 // Lark has Chat/time-range listing and Thread listing, not a native around-message API.
 export async function readExternalHistory(client, identity, route, query, signal) {
   if (!route || !identifier(route.messageId) || !identifier(route.conversationId)
-    || !identifier(route.actorId) || ['threadId', 'rootId', 'parentId'].some(key => route[key] !== undefined && !identifier(route[key])) || !['group', 'nearby', 'thread'].includes(query?.scope)
+    || !identifier(route.actorId) || ['threadId', 'rootId', 'parentId'].some(key => route[key] !== undefined && !identifier(route[key])) || !['message', 'group', 'nearby', 'thread'].includes(query?.scope)
     || !Number.isInteger(query.limit) || query.limit < 1 || query.limit > 20
     || (query.cursor !== undefined && (typeof query.cursor !== 'string' || !query.cursor || query.cursor.length > 4096)))
     refuse('bad-request');
+  if (query.scope === 'message' && (query.limit !== 1 || query.cursor !== undefined
+    || query.beforeCount !== undefined || query.afterCount !== undefined)) refuse('bad-request');
   if (query.scope === 'nearby' && [query.beforeCount ?? 10, query.afterCount ?? 5]
     .some(value => !Number.isInteger(value) || value < 0 || value > 20)) refuse('bad-request');
   signal?.throwIfAborted();
-  const reference = await client.im.v1.message.get({ path: { message_id: route.messageId }, params: { with_sender_name: true } }, { signal });
+  const reference = await client.im.v1.message.get({ path: { message_id: route.messageId }, params: { with_sender_name: true, user_id_type: 'open_id' } }, { signal });
   signal?.throwIfAborted();
   check(reference);
   const source = (Array.isArray(reference?.data?.items) ? reference.data.items : []).find(item => item?.message_id === route.messageId);
@@ -35,6 +37,26 @@ export async function readExternalHistory(client, identity, route, query, signal
   signal?.throwIfAborted();
   const seconds = Math.floor(Number(source.create_time) / 1000);
   if (!Number.isFinite(seconds) || seconds <= 0) refuse('stale-route');
+  // Explicit user_id_type preserves Human open_id and returns Bot app_id.
+  // https://open.feishu.cn/document/server-docs/im-v1/message/get.md
+  // Bot open_id equality across receiving apps is not an identity contract.
+  const normalize = item => normalizeExternalText({ event_id: `history:${item.message_id}`,
+    sender: { sender_type: 'user', sender_id: { open_id: item.sender.id }, sender_name: item.sender.sender_name,
+      ...(item.sender.tenant_key === undefined ? {} : { tenant_key: item.sender.tenant_key }) },
+    message: { ...item, chat_type: 'group', message_type: item.msg_type, content: item.body?.content,
+      mentions: (item.mentions ?? []).map(mention => ({ ...mention,
+        id: { [mention?.id_type === 'app_id' ? 'app_id' : 'open_id']: mention?.id } })) },
+  }, identity);
+  if (query.scope === 'message') {
+    if (source.updated === true) refuse('stale-route');
+    if (source.updated !== false) refuse('source-unavailable');
+    let anchor;
+    try { anchor = normalize(source); }
+    catch (error) { if (error?.code !== 'invalid-inbound') throw error; refuse('source-unavailable'); }
+    if (!anchor) refuse('source-unavailable');
+    return { version: 1, scope: 'message', source: anchor, events: [anchor], omitted: 0,
+      hasMore: false, coverage: 'provider-verified-source' };
+  }
   const readPage = async params => {
     const response = await client.im.v1.message.list({ params }, { signal });
     signal?.throwIfAborted();
@@ -51,11 +73,7 @@ export async function readExternalHistory(client, identity, route, query, signal
         || item.sender?.id_type !== 'open_id') { ++omitted; continue; }
       if (item.mentions !== undefined && (!Array.isArray(item.mentions) || item.mentions.length > 100)) { ++omitted; continue; }
       let event;
-      try { event = normalizeExternalText({ event_id: `history:${item.message_id}`,
-        sender: { sender_type: 'user', sender_id: { open_id: item.sender.id }, sender_name: item.sender.sender_name },
-        message: { ...item, chat_type: 'group', message_type: item.msg_type, content: item.body?.content,
-          mentions: (item.mentions ?? []).map(mention => ({ ...mention, id: { open_id: mention?.id } })) },
-      }, identity); } catch (error) {
+      try { event = normalize(item); } catch (error) {
         if (error?.code !== 'invalid-inbound') throw error;
         ++omitted; continue;
       }
