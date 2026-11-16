@@ -50,9 +50,10 @@ export async function installProductionChannel(ctx, config, {
   const closeProduction = () => (closing ??= (async () => {
     try {
       unregisterSetup?.();
-      await unregisterDelivery?.();
+      await production?.prepareClose?.();
     } finally {
-      await production?.close();
+      try { await unregisterDelivery?.(); }
+      finally { await production?.close(); }
     }
   })());
   try {

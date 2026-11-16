@@ -54,6 +54,8 @@ export class QqController {
   #transitions = new Map();
   #revision = 0;
   #closed = false;
+  #closing = null;
+  #quiesced = new Set();
   #inboundConsumers = new ExclusiveInboundConsumers();
 
   constructor({
@@ -94,7 +96,8 @@ export class QqController {
     if (this.#closed) return this.status();
     for (const config of this.#configStore.list()) {
       await this.#withBotTransition(config.botId, async () => {
-        if (this.#closed || this.#runtimes.get(config.botId)?.status?.ready) return;
+        if (this.#closed || this.#quiesced.has(config.botId) || this.#runtimes.get(config.botId)?.status?.ready
+          || this.#runtimes.get(config.botId)?.status?.qqConnectionState === 'awaiting-consumer') return;
         try {
           const appSecret = await this.#resolveSecret(config.secretRef);
           if (!appSecret) {
@@ -115,8 +118,9 @@ export class QqController {
   }
 
   async startProvisioning() {
-    if (this.#closed) throw new Error('QQ controller is closed');
+    if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
     if (this.#activeAttemptId) await this.cancelProvisioning(this.#activeAttemptId);
+    if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
     let firstQrResolve;
     let firstQrReject;
     const firstQr = new Promise((resolve, reject) => {
@@ -194,20 +198,20 @@ export class QqController {
   }
 
   async bindCredentials({ appId, appSecret } = {}) {
-    if (this.#closed) throw new Error('QQ controller is closed');
+    if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
     const normalizedAppId = cleanString(appId);
     const normalizedSecret = cleanString(appSecret);
     if (!normalizedAppId || !normalizedSecret) {
       throw new TypeError('QQ AppID and AppSecret are required');
     }
     if (this.#activeAttemptId) await this.cancelProvisioning(this.#activeAttemptId);
-    if (this.#closed) throw new Error('QQ controller is closed');
+    if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
     const identity = deriveQqBotIdentity(normalizedAppId);
     await this.#withBotTransition(identity.botId, async () => {
-      if (this.#closed) throw new Error('QQ controller is closed');
+      if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
       const previousConfig = this.#configStore.getByAppId(normalizedAppId);
       const previousSecret = await atConnectionStage('credential.read', () => this.#credentials.resolve(identity.secretRef), 'credential-store');
-      if (this.#closed) throw new Error('QQ controller is closed');
+      if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
       const config = {
         botId: identity.botId,
         appId: normalizedAppId,
@@ -313,23 +317,28 @@ export class QqController {
     if (this.#closed) throw qqRefusal('provider-unavailable');
     if (!this.#configStore.get(botId)) throw qqRefusal('unknown-bot');
     const runtime = this.#runtimes.get(botId);
-    if (!runtime?.status?.ready) throw qqRefusal('bot-not-connected');
-    return runtime.describeDeliveryAccount(signal);
+    if (!runtime) throw qqRefusal('bot-not-connected');
+    const account = await runtime.describeDeliveryAccount(signal);
+    if (this.#closed || this.#runtimes.get(botId) !== runtime) throw qqRefusal('provider-unavailable');
+    return account;
   }
 
   async describeDeliveryAccount(botId) {
-    return this.#withBotTransition(botId, async () => ({
-      version: 1, botId, channel: 'qq', account: await this.#deliveryAccount(botId), connected: true,
+    const account = await this.#deliveryAccount(botId);
+    const receiverReady = this.#runtimes.get(botId)?.status?.ready === true;
+    return {
+      version: 1, botId, channel: 'qq', account, connected: receiverReady, accountVerified: true, receiverReady,
       capabilities: ['proactive-text-checked', 'proactive-receipt-checked', 'proactive-fence-checked',
-        'exclusive-text-consumer', 'ordinary-text-consumer', 'direct-message-consumer', 'reply-text-checked', 'reply-context-checked',
+        'exclusive-text-consumer', 'inbound-drain-checked', 'ordinary-text-consumer', 'direct-message-consumer', 'reply-text-checked', 'reply-context-checked',
         'reply-receipt-checked', 'reply-fence-checked', 'source-file-checked', 'source-image-checked',
         'reply-file-checked', 'reply-image-fence-checked', 'reply-file-receipt-checked',
         'source-generic-file-checked', 'reply-file-fence-checked', 'source-voice-transcript-checked', 'source-voice-audio-checked'],
-    }));
+    };
   }
 
   async consumeInbound(botId, { expectedFingerprint, onEvent, signal, sourceImages = false, sourceFiles = false, sourceVoiceTranscripts = false, sourceVoiceAudio = false, ordinaryText = false, directMessages = false } = {}) {
     return this.#withBotTransition(botId, async () => {
+      if (this.#quiesced.has(botId)) await this.#resumeInbound(botId, expectedFingerprint, signal);
       const account = await this.#deliveryAccount(botId, signal);
       if (account.fingerprint !== expectedFingerprint) throw qqRefusal('account-changed');
       const dispose = this.#inboundConsumers.register(botId, { fingerprint: expectedFingerprint, onEvent, signal, sourceImages, sourceFiles, sourceVoiceTranscripts, sourceVoiceAudio, ordinaryText, directMessages });
@@ -365,6 +374,50 @@ export class QqController {
     });
   }
 
+  async releaseSource(botId, route, options = {}) {
+    const checked = await this.#checkedRuntime(botId, options.expectedFingerprint, options.signal);
+    return checked.runtime.releaseSource(route, { signal: checked.signal });
+  }
+
+  async quiesceInbound(botId, options = {}) {
+    const checked = await this.#checkedRuntime(botId, options.expectedFingerprint, options.signal);
+    this.#quiesced.add(botId);
+    return checked.runtime.quiesce();
+  }
+
+  async #resumeInbound(botId, expectedFingerprint, signal) {
+    const reopening = this.#quiesced.has(botId);
+    if (reopening) {
+      try {
+        this.#inboundConsumers.signalFor(botId, expectedFingerprint);
+        throw qqRefusal('consumer-conflict');
+      } catch (error) { if (error.code !== 'consumer-unavailable') throw error; }
+      const config = this.#configStore.get(botId);
+      if (!config) throw qqRefusal('unknown-bot');
+      const secret = await this.#resolveSecret(config.secretRef);
+      if (!secret) throw qqRefusal('account-unverified');
+      signal?.throwIfAborted();
+      this.#quiesced.delete(botId);
+      try { await this.#startRuntime(config, secret); }
+      catch (error) { this.#quiesced.add(botId); throw error; }
+    }
+    try {
+      const account = await this.#deliveryAccount(botId, signal);
+      if (account.fingerprint !== expectedFingerprint) throw qqRefusal('account-changed');
+      return { connected: this.#runtimes.get(botId)?.status?.ready === true, accountVerified: true };
+    } catch (error) {
+      if (reopening) {
+        this.#quiesced.add(botId);
+        await this.#stopRuntime(botId, { drain: false });
+      }
+      throw error;
+    }
+  }
+
+  async resumeInbound(botId, options = {}) {
+    return this.#withBotTransition(botId, () => this.#resumeInbound(botId, options.expectedFingerprint, options.signal));
+  }
+
   async replyChecked(botId, route, text, options = {}) {
     return this.#withBotTransition(botId, async () => {
       const checked = await this.#checkedRuntime(botId, options.expectedFingerprint, options.signal);
@@ -394,7 +447,7 @@ export class QqController {
     await this.#withBotTransition(botId, async () => {
       const previous = await atConnectionStage('credential.read', () => this.#credentials.resolve(config.secretRef), 'credential-store');
       this.#inboundConsumers.remove(botId);
-      await this.#stopRuntime(botId);
+      await this.#stopRuntime(botId, { drain: false });
       try {
         await atConnectionStage('credential.remove', () => this.#credentials.unset(config.secretRef), 'credential-store');
         await atConnectionStage('account.remove', () => this.#configStore.remove(botId), 'account-config');
@@ -412,6 +465,7 @@ export class QqController {
       }
       await this.#deleteState({ botId, config }).catch(error => { warnings.push(this.#diagnostics.report(error, { reuse: true, operation: 'bot.delete', stage: 'state.cleanup', resource: 'account-state', warning: true, publicError: { code: 'cleanup-failed', message: '账号已移除，但本地状态清理失败。' } }).publicError); });
       this.#errors.delete(botId);
+      this.#quiesced.delete(botId);
       this.#touch();
     });
     return { ...this.status(), ...(warnings.length ? { warnings } : {}) };
@@ -467,13 +521,22 @@ export class QqController {
     };
   }
 
-  async close() {
+  async close({ drain } = {}) {
     if (this.#closed) return;
-    this.#closed = true;
-    this.#inboundConsumers.close();
-    if (this.#activeAttemptId) await this.cancelProvisioning(this.#activeAttemptId);
-    await Promise.allSettled([...this.#transitions.values()]);
-    await Promise.allSettled([...this.#runtimes.keys()].map((botId) => this.#stopRuntime(botId)));
+    if (this.#closing) return this.#closing;
+    this.#closing = (async () => {
+      try {
+        if (this.#activeAttemptId) await this.cancelProvisioning(this.#activeAttemptId);
+        await Promise.allSettled([...this.#transitions.values()]);
+        const results = await Promise.allSettled([...this.#runtimes.keys()].map(botId => this.#stopRuntime(botId, { drain })));
+        const failed = results.find(result => result.status === 'rejected');
+        if (failed) throw failed.reason;
+      } finally {
+        this.#closed = true;
+        this.#inboundConsumers.close();
+      }
+    })();
+    return this.#closing;
   }
 
   async #completeProvisioning(record, credentials) {
@@ -558,9 +621,10 @@ export class QqController {
   }
 
   async #startRuntime(config, appSecret) {
-    if (this.#closed) throw new Error('QQ controller is closed');
-    await this.#stopRuntime(config.botId);
-    if (this.#closed) throw new Error('QQ controller is closed');
+    if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
+    if (this.#quiesced.has(config.botId)) throw qqRefusal('provider-unavailable');
+    await this.#stopRuntime(config.botId, { drain: false });
+    if (this.#closed || this.#closing) throw new Error('QQ controller is closed');
     const runtime = await atConnectionStage('runtime.prepare', () => this.#createRuntime({ botId: config.botId, config, appSecret,
       ...(config.consumerMode === 'external-consumer' ? {
         externalConsumer: (event, signal) => this.#inboundConsumers.accept(config.botId, event, signal),
@@ -577,7 +641,8 @@ export class QqController {
     }
     this.#runtimes.set(config.botId, runtime);
     try {
-      await runtime.start();
+      await runtime.start({ receive: config.consumerMode !== 'external-consumer'
+        || this.#inboundConsumers.isRegistered(config.botId) });
     } catch (error) {
       await runtime.stop().catch(() => undefined);
       this.#runtimes.delete(config.botId);
@@ -585,12 +650,15 @@ export class QqController {
     }
   }
 
-  async #stopRuntime(botId) {
+  async #stopRuntime(botId, { drain } = {}) {
     const runtime = this.#runtimes.get(botId);
-    this.#runtimes.delete(botId);
-    await runtime?.stop().catch((error) => {
+    try { await runtime?.stop({ drain }); }
+    catch (error) {
       this.#logger.warn?.(`[dsh-im:qq] bot ${botId} failed to stop cleanly:`, extractConnectionEvidence(error).details);
-    });
+      if (drain !== false) throw error;
+    } finally {
+      if (this.#runtimes.get(botId) === runtime) this.#runtimes.delete(botId);
+    }
   }
 
   async #resolveSecret(ref) {
@@ -604,6 +672,7 @@ export class QqController {
   }
 
   #withBotTransition(botId, operation) {
+    if (this.#closing) return Promise.reject(qqRefusal('provider-unavailable'));
     const previous = this.#transitions.get(botId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(operation);
     const settled = current.finally(() => {

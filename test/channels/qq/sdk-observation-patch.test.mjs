@@ -7,6 +7,7 @@ import test from 'node:test';
 import { build } from 'esbuild';
 import { WebSocketServer } from 'ws';
 import { patchQqObservationSource, qqSdkObservationPatch } from '../../../plugin-src/host/qq-sdk-observation-patch.mjs';
+import { QqStateStore } from '../../../src/channels/qq/state-store.mjs';
 
 const packageRoot = resolve(import.meta.dirname, '../../..');
 const json = value => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
@@ -51,8 +52,9 @@ test('the production build patch observes real WS messages before decode and pre
   const records = [];
   const logs = [];
   const admitted = [];
+  const state = await new QqStateStore(join(directory, 'state.json')).load();
   const runtime = new QqRuntime({ config: { appId: 'test-app', botId: 'test-bot', consumerMode: 'external-consumer' },
-    appSecret: 'private-secret', state: {}, harness: {},
+    appSecret: 'private-secret', state, harness: {},
     externalConsumer: async event => { admitted.push(event); return { accepted: true }; },
     logger: { info: (...args) => {
       logs.push(args); records.push(...args.filter(value => value?.event));
@@ -62,7 +64,7 @@ test('the production build patch observes real WS messages before decode and pre
       error: (...args) => logs.push(args), warn() {} },
   });
   t.after(async () => {
-    await runtime.stop();
+    await runtime.stop({ drain: false });
     for (const client of server.clients) client.terminate();
     await new Promise(resolve => server.close(resolve));
     globalThis.fetch = previousFetch;
@@ -77,8 +79,13 @@ test('the production build patch observes real WS messages before decode and pre
   const deadline = Date.now() + 5_000;
   while (admitted.length === 0 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(admitted.length, 1);
+  socket.send(JSON.stringify({ op: 0, s: 3, t: 'GROUP_AT_MESSAGE_CREATE', d: null }));
+  const refusedDeadline = Date.now() + 5000;
+  while (!records.some(value => value.phase === 'processing-refused') && Date.now() < refusedDeadline)
+    await new Promise(resolve => setTimeout(resolve, 10));
   const transport = records.filter(value => value.event === 'qq.native-transport.frame');
   assert.ok(transport.some(value => value.phase === 'parse-refused'));
+  assert.ok(transport.some(value => value.phase === 'processing-refused'));
   assert.ok(transport.some(value => value.phase === 'decoded' && value.opcode === 'other'));
   const gateway = records.find(value => value.event === 'qq.native-gateway.frame');
   assert.ok(transport.some(value => value.phase === 'decoded' && value.connection === gateway.transport.connection && value.frame === gateway.transport.frame));
@@ -97,4 +104,6 @@ test('the production build patch observes real WS messages before decode and pre
   assert.equal(admitted.length, 1);
   for (const text of ['private-secret', 'private-token', 'private-session', 'private-invalid-json', 'private-event', 'private-question', 'private-human'])
     assert.equal(JSON.stringify(logs).includes(text), false, `diagnostic leaked ${text}`);
+  await assert.rejects(() => runtime.stop(), { code: 'admission-unresolved' });
+  assert.equal((await new QqStateStore(join(directory, 'state.json')).load()).snapshot().gatewaySession, undefined);
 });

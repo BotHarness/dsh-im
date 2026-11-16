@@ -450,6 +450,57 @@ export class DeliveryService {
     return dispose;
   }
 
+  /** Stop this receiver after canonical acceptance, before its lease is revoked.
+   * A saved cursor is a normal-update resume position, not a delivery guarantee.
+   */
+  async quiesceInbound(botId, options = {}) {
+    const id = botIdOf(botId);
+    cancellation(options.signal);
+    if (!/^[a-f0-9]{64}$/.test(options.expectedFingerprint ?? '')) throw deliveryError('bad-request');
+    const registration = await this.#checkedRegistrationFor(id);
+    if (typeof registration.adapter.quiesceInbound !== 'function') throw deliveryError('capability-unavailable');
+    this.#assertRegistered(registration);
+    const result = await registration.adapter.quiesceInbound(id, {
+      ...options, signal: options.signal ? AbortSignal.any([options.signal, registration.controller.signal])
+        : registration.controller.signal,
+    });
+    this.#assertRegistered(registration);
+    if (result?.stopped !== true || typeof result.resumeCursor !== 'boolean') throw deliveryError('stop-result-unknown');
+    return result;
+  }
+
+  async releaseSource(botId, route, options = {}) {
+    const id = botIdOf(botId);
+    cancellation(options.signal);
+    if (!/^[a-f0-9]{64}$/.test(options.expectedFingerprint ?? '')) throw deliveryError('bad-request');
+    const registration = await this.#checkedRegistrationFor(id);
+    if (typeof registration.adapter.releaseSource !== 'function') throw deliveryError('capability-unavailable');
+    this.#assertRegistered(registration);
+    const result = await registration.adapter.releaseSource(id, structuredClone(route), {
+      ...options, signal: options.signal ? AbortSignal.any([options.signal, registration.controller.signal]) : registration.controller.signal,
+    });
+    this.#assertRegistered(registration);
+    cancellation(options.signal);
+    return result;
+  }
+
+  /** Reopen an explicitly registered receiver before inspecting its connection. */
+  async resumeInbound(botId, options = {}) {
+    const id = botIdOf(botId);
+    cancellation(options.signal);
+    if (!/^[a-f0-9]{64}$/.test(options.expectedFingerprint ?? '')) throw deliveryError('bad-request');
+    const registration = await this.#checkedRegistrationFor(id);
+    if (typeof registration.adapter.resumeInbound !== 'function') throw deliveryError('capability-unavailable');
+    this.#assertRegistered(registration);
+    const result = await registration.adapter.resumeInbound(id, {
+      ...options, signal: options.signal ? AbortSignal.any([options.signal, registration.controller.signal])
+        : registration.controller.signal,
+    });
+    this.#assertRegistered(registration);
+    if (typeof result?.connected !== 'boolean' || result.accountVerified !== true) throw deliveryError('start-result-unknown');
+    return result;
+  }
+
   async reactionChecked(botId, route, reaction, options = {}) {
     const id = botIdOf(botId);
     cancellation(options.signal);

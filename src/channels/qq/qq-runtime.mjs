@@ -1,6 +1,7 @@
 import { isQqVoiceAttachment } from './voice-attachment.mjs';
 import { extractConnectionEvidence, createConnectionDiagnostics, atConnectionStage } from '../shared/connection-error.mjs';
 import { QQBot, contentSanitizer, typingIndicator } from '@tencent-connect/qqbot-nodejs';
+import { createHash } from 'node:crypto';
 
 import {
   connectionTestTarget,
@@ -61,6 +62,14 @@ export class QqRuntime {
   #directMessages;
   #rateLimitRetryDelaysMs;
   #externalBridge = null;
+  #accepting = false;
+  #inflight = new Set();
+  #admissionFailed = false;
+  #gatewaySession = null;
+  #sessionBinding;
+  #stopping = null;
+  #draining = false;
+  #waitingForConsumer = false;
 
   constructor({
     config,
@@ -110,12 +119,12 @@ export class QqRuntime {
 
   async describeDeliveryAccount(signal) {
     signal?.throwIfAborted();
-    if (!this.#status.ready || !this.#bot) throw qqRefusal('bot-not-connected');
+    if ((!this.#status.ready && !this.#draining && !this.#waitingForConsumer) || !this.#bot) throw qqRefusal('bot-not-connected');
     const bot = this.#bot;
     try {
       const user = await bot.api.get('/users/@me');
       signal?.throwIfAborted();
-      if (this.#bot !== bot || !this.#status.ready) throw qqRefusal('bot-not-connected');
+      if (this.#bot !== bot || (!this.#status.ready && !this.#draining && !this.#waitingForConsumer)) throw qqRefusal('bot-not-connected');
       const account = verifiedQqAccount(this.#config.appId, user);
       if (this.#status.error?.details?.stage === 'credential.verify') {
         this.#status.error = null;
@@ -151,6 +160,11 @@ export class QqRuntime {
   replyChecked(route, text, options) {
     if (!this.#externalBridge) throw qqRefusal('consumer-unavailable');
     return this.#externalBridge.reply(route, text, options);
+  }
+
+  releaseSource(route, { signal } = {}) {
+    if (!this.#externalBridge) throw qqRefusal('consumer-unavailable');
+    return this.#externalBridge.release(route, signal);
   }
 
   readSourceImage(route, attachment, options) {
@@ -251,17 +265,21 @@ export class QqRuntime {
     }, text);
   }
 
-  async start() {
+  async start({ receive = true } = {}) {
     if (this.#status.ready && this.#bot) return this.status;
     if (this.#starting) return this.#starting;
-    this.#starting = this.#start().finally(() => {
+    this.#starting = this.#start(receive).finally(() => {
       this.#starting = null;
     });
     return this.#starting;
   }
 
-  async #start() {
+  async #start(receive) {
     await this.stop();
+    this.#waitingForConsumer = false;
+    this.#accepting = true;
+    this.#admissionFailed = false;
+    this.#gatewaySession = null;
     this.#status.startedAt = new Date().toISOString();
     this.#status.qqConnectionState = 'connecting';
     this.#status.lastError = null; this.#status.error = null; this.#diagnostics.clear();
@@ -274,6 +292,7 @@ export class QqRuntime {
     this.#abortController = controller;
     const observeTransport = (message) => {
       if (controller.signal.aborted || this.#abortController !== controller || typeof message !== 'string') return;
+      if (this.#draining) return false;
       // SDK 1.0.4 exposes close through its public Logger, not a disconnect event.
       if (message.startsWith(`[${this.#config.botId}] WebSocket closed:`)
         || message.startsWith(`[${this.#config.botId}] Connection failed:`)
@@ -314,9 +333,29 @@ export class QqRuntime {
       logger: sdkLogger,
       transport: 'websocket',
       tokenPrefetch: 'sync',
+      ...(this.#config.consumerMode === 'external-consumer' && this.#state.gatewaySession ? {
+        sessionPersistence: {
+          load: () => this.#state.gatewaySession(this.#sessionBinding),
+          save: session => {
+            if (this.#accepting && this.#abortController === controller)
+              this.#gatewaySession = structuredClone(session);
+          },
+          clear: () => {
+            if (!this.#accepting || this.#abortController !== controller) return;
+            this.#gatewaySession = null;
+            const write = this.#state.setGatewaySession(this.#sessionBinding, null);
+            this.#inflight.add(write);
+            write.then(() => this.#inflight.delete(write), () => {
+              this.#admissionFailed = true;
+              this.#inflight.delete(write);
+            });
+          },
+        },
+      } : {}),
       // Public option proposed by the maintained, hash-checked SDK build patch.
       onGatewayObservation: value => {
         if (!controller.signal.aborted && this.#abortController === controller) {
+          if (['parse-refused', 'processing-refused'].includes(value?.phase)) this.#admissionFailed = true;
           transportDiagnostics?.observe(value, controller.signal);
           if (transportDiagnostics) this.#status.transportObservation = transportDiagnostics.snapshot;
         }
@@ -333,12 +372,16 @@ export class QqRuntime {
       try {
         const nativeUser = await bot.api.get('/users/@me');
         const account = verifiedQqAccount(this.#config.appId, nativeUser);
+        this.#sessionBinding = createHash('sha256').update(JSON.stringify([
+          this.#config.botId, account.fingerprint, this.#appSecret,
+        ])).digest('hex');
         controller.signal.throwIfAborted();
         gatewayDiagnostics = new QqNativeGatewayDiagnostics({ botId: this.#config.botId, account,
           report: record => this.#logger.info?.('[dsh-im:qq] native gateway diagnostic', record) });
         transportDiagnostics = new QqNativeTransportDiagnostics({ account,
           report: record => this.#logger.info?.('[dsh-im:qq] native transport diagnostic', record) });
         this.#externalBridge = new QqExternalConsumer({ bot, account, nativeUser, botId: this.#config.botId,
+          state: this.#state,
           accept: this.#externalConsumer,
           sourceImages: this.#sourceImages,
           sourceFiles: this.#sourceFiles,
@@ -351,7 +394,7 @@ export class QqRuntime {
           reportNativeFrame: record => this.#logger.info?.('[dsh-im:qq] native reply frame', record),
         });
       } catch (error) {
-        await this.stop();
+        await this.stop({ drain: false });
         throw error;
       }
     }
@@ -370,6 +413,18 @@ export class QqRuntime {
     // QQ delivers emoji/face messages as opaque `<faceType=..,faceId="..",ext="..">`
     // tags. Parse them into readable text so the Harness sees what the sender
     // actually meant instead of an unusable markup fragment.
+    const trackedAdmission = Symbol('qq-inbound-admission');
+    if (this.#config.consumerMode === 'external-consumer') bot.use((ctx, next) => {
+      if (!this.#accepting) return;
+      ctx.state[trackedAdmission] = true;
+      const pending = Promise.resolve().then(next);
+      this.#inflight.add(pending);
+      pending.then(() => this.#inflight.delete(pending), () => {
+        this.#admissionFailed = true;
+        this.#inflight.delete(pending);
+      });
+      return pending;
+    });
     bot.use(contentSanitizer({ parseFaceTags: true }));
     if (this.#config.consumerMode !== 'external-consumer') bot.use?.(this.#typingMiddleware({
       keepAlive: true,
@@ -419,6 +474,7 @@ export class QqRuntime {
     };
     const onMessage = async (_ctx, message) => {
       if (controller.signal.aborted || this.#bot !== bot) return;
+      if (!this.#accepting && !_ctx?.state?.[trackedAdmission]) return;
       const elements = Array.isArray(message?.raw?.msg_elements) ? message.raw.msg_elements : [];
       const quotedAttachments = elements.slice(0, 2).flatMap(element => Array.isArray(element?.attachments)
         ? element.attachments.slice(0, 33) : []);
@@ -475,7 +531,8 @@ export class QqRuntime {
         ? this.#externalBridge?.accept(message, controller.signal)
         : this.#bridge?.accept(message);
       if (!task) return;
-      return task.catch((error) => {
+      const pending = task.catch((error) => {
+        if (this.#config.consumerMode === 'external-consumer') this.#admissionFailed = true;
         if (controller.signal.aborted) return;
         lastInbound.refusalCode = typeof error?.code === 'string' && /^[a-z-]{1,64}$/.test(error.code)
           ? error.code : 'message-handling-failed';
@@ -487,12 +544,22 @@ export class QqRuntime {
           extractConnectionEvidence(error).details,
         );
       });
+      this.#inflight.add(pending);
+      pending.then(() => this.#inflight.delete(pending), () => this.#inflight.delete(pending));
+      return pending;
     };
     bot.on('ready', onReady);
     bot.on('resumed', onReady);
     bot.on('error', onError);
     bot.on('message', onMessage);
 
+    if (!receive && this.#config.consumerMode === 'external-consumer') {
+      this.#waitingForConsumer = true;
+      this.#accepting = false;
+      this.#status.ready = false;
+      this.#status.qqConnectionState = 'awaiting-consumer';
+      return this.status;
+    }
     const runTask = Promise.resolve().then(() => bot.start(controller.signal));
     this.#runTask = runTask;
     runTask.catch((error) => {
@@ -523,35 +590,63 @@ export class QqRuntime {
       this.#status.qqConnectionState = 'failed';
       this.#status.error = this.#diagnostics.report(error, { operation: 'connection.monitor', botId: this.#config?.botId, automatic: true }).publicError;
       this.#status.lastError = this.#status.error.message;
-      await this.stop();
+      await this.stop({ drain: false });
       throw error;
     } finally {
       clearTimeout(timer);
     }
   }
 
-  async stop() {
+  async stop({ drain = this.#config.consumerMode === 'external-consumer' } = {}) {
+    if (this.#stopping) return this.#stopping;
     const bot = this.#bot;
+    if (!bot) return this.status;
     const bridge = this.#bridge;
     const runTask = this.#runTask;
-    this.#abortController?.abort();
-    this.#abortController = null;
-    this.#bot = null;
-    this.#bridge = null;
-    this.#externalBridge = null;
-    this.#runTask = null;
-    try {
-      bot?.stop();
-    } catch (error) {
-      this.#logger.warn?.(`[dsh-im:qq] bot ${this.#config.botId} failed to stop cleanly:`, extractConnectionEvidence(error).details);
-    }
-    await Promise.race([
-      runTask?.catch(() => undefined) ?? Promise.resolve(),
-      new Promise((resolve) => setTimeout(resolve, 2_000)),
-    ]);
-    await bridge?.waitForIdle();
+    const controller = this.#abortController;
+    this.#accepting = false;
+    this.#draining = drain;
     this.#status.ready = false;
-    this.#status.qqConnectionState = 'idle';
-    return this.status;
+    this.#status.qqConnectionState = drain ? 'draining' : 'idle';
+    const session = structuredClone(this.#gatewaySession);
+    this.#stopping = (async () => {
+      try {
+        if (!drain) controller?.abort();
+        bot.stop();
+        if (drain) {
+          while (this.#inflight.size) await Promise.allSettled([...this.#inflight]);
+          if (this.#admissionFailed) throw qqRefusal('admission-unresolved');
+          if (session && this.#state.setGatewaySession)
+            await this.#state.setGatewaySession(this.#sessionBinding, session);
+        }
+      } finally {
+        controller?.abort();
+        this.#abortController = null;
+        this.#bot = null;
+        this.#bridge = null;
+        this.#externalBridge = null;
+        this.#runTask = null;
+        this.#draining = false;
+        this.#waitingForConsumer = false;
+        await Promise.race([
+          runTask?.catch(() => undefined) ?? Promise.resolve(),
+          new Promise(resolve => setTimeout(resolve, 2_000)),
+        ]);
+        await bridge?.waitForIdle();
+        this.#status.ready = false;
+        this.#status.qqConnectionState = 'idle';
+      }
+      return this.status;
+    })();
+    try { return await this.#stopping; }
+    finally { this.#stopping = null; }
+  }
+
+  async quiesce() {
+    await this.stop({ drain: true });
+    if (this.#admissionFailed) throw qqRefusal('admission-unresolved');
+    const saved = this.#state.gatewaySession?.(this.#sessionBinding);
+    return { stopped: true, resumeCursor: Boolean(saved && this.#gatewaySession
+      && saved.sessionId === this.#gatewaySession.sessionId && saved.lastSeq === this.#gatewaySession.lastSeq) };
   }
 }

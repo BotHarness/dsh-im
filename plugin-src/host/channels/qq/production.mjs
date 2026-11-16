@@ -179,6 +179,10 @@ export async function createProductionController(ctx, config = {}, internals = {
     controller,
     deliveryAdapter: createDeliveryAdapter({ channel: 'qq', workspaces, coreController, stateFor }),
     ready: supervisor.ready,
+    async prepareClose() {
+      await supervisor.close();
+      await controller.close();
+    },
     async close() {
       await supervisor.close();
       await controller.close();
