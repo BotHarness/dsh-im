@@ -817,7 +817,7 @@ export class DiscordRuntime {
               d: {
                 token: this.#token,
                 intents: this.#config.consumerMode === 'external-consumer'
-                  ? (1 << 0) | (1 << 9) | (this.#ordinaryAuthorized && this.#externalOrdinaryText() === true ? (1 << 15) : 0)
+                  ? (1 << 0) | (1 << 9) | (1 << 12) | (this.#ordinaryAuthorized && this.#externalOrdinaryText() === true ? (1 << 15) : 0)
                   : DISCORD_GATEWAY_INTENTS,
                 properties: {
                   os: process.platform,
@@ -937,8 +937,9 @@ export class DiscordRuntime {
 
   async #acceptExternalMessage(message, sequence, generation) {
     if (!this.#account || !this.#status.ready || generation !== this.#generation
-      || !message?.guild_id || message.webhook_id || message.author?.id === this.#account.userId
-      || !Array.isArray(message.mentions)) return;
+      || message?.webhook_id || message?.author?.id === this.#account.userId
+      || !Array.isArray(message?.mentions)) return;
+    if (!message.guild_id) return this.#acceptExternalDirectMessage(message, sequence);
     let mentioned = message.mentions.some(user => user.id === this.#account.userId);
     const roleCandidate = Array.isArray(message.mention_roles) && message.mention_roles.some(discordSnowflake);
     if (message.author?.bot === true && !mentioned && !roleCandidate) return;
@@ -968,6 +969,23 @@ export class DiscordRuntime {
     if (!event) return;
     if (!mentioned && this.#externalOrdinaryText() !== true) return;
     if (mentioned && this.#externalSourceFiles() === true) event = externalAttachments(event, message);
+    if (typeof this.#externalConsumer !== 'function') throw discordRefusal('consumer-unavailable');
+    const result = await this.#externalConsumer(event, checked.signal);
+    checked.assertCurrent();
+    if (result?.accepted !== true) throw discordRefusal('ingress-not-accepted');
+    this.#status.messagesReceived++;
+  }
+
+  async #acceptExternalDirectMessage(message, sequence) {
+    if (message.author?.bot === true || typeof message.content !== 'string' || !message.content.trim()) return;
+    const checked = this.#checkedLifetime();
+    const channel = await inspectDiscordSourceChannel(checked.api, message.channel_id, checked.account, checked.signal);
+    checked.assertCurrent();
+    if (!channel.direct) throw discordRefusal('stale-route');
+    let event = normalizeDiscordExternalText(message, { botId: this.#config.botId, account: checked.account,
+      channel, eventId: `gateway:${this.#sessionId}:${sequence}` });
+    if (!event) return;
+    if (this.#externalSourceFiles() === true) event = externalAttachments(event, message);
     if (typeof this.#externalConsumer !== 'function') throw discordRefusal('consumer-unavailable');
     const result = await this.#externalConsumer(event, checked.signal);
     checked.assertCurrent();

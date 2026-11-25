@@ -205,7 +205,7 @@ test('exclusive runtime uses mention intents and no standalone Session/thread, w
     createWebSocket: () => { socket = new Socket(); queueMicrotask(() => socket.packet({ op: 10, d: { heartbeat_interval: 45000 } })); return socket; },
     logger: { warn() {}, error() {} }, connectTimeoutMs: 200 });
   try {
-    await runtime.start(); assert.equal(socket.sent[0].d.intents, (1 << 0) | (1 << 9));
+    await runtime.start(); assert.equal(socket.sent[0].d.intents, (1 << 0) | (1 << 9) | (1 << 12));
     socket.packet({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: f.message }); await flush();
     assert.equal(accepted, 1); assert.equal(sessions, 0); assert.equal(creates, 0);
     socket.packet({ op: 0, t: 'MESSAGE_CREATE', s: 3, d: f.message }); await flush();
@@ -311,7 +311,7 @@ test('Gateway attachment admission requires opted-in mention; rejects unsupporte
     logger: { warn(...args) { failures.push(args); }, error(...args) { failures.push(args); } }, connectTimeoutMs: 200 });
   const dispatch = async message => { socket.packet({ op: 0, t: 'MESSAGE_CREATE', s: 42, d: message }); await flush(); };
   try {
-    await runtime.start(); assert.equal(socket.sent[0].d.intents, (1 << 0) | (1 << 9));
+    await runtime.start(); assert.equal(socket.sent[0].d.intents, (1 << 0) | (1 << 9) | (1 << 12));
     await dispatch(f.message); assert.equal(received.length, 1);
     assert.equal(received[0].attachments[0].resourceKey, ids.sent);
     assert.equal(received[0].reply.threadId, ids.thread);
@@ -482,7 +482,7 @@ test('ordinary Gateway requires consumer opt-in AND native approval; OFF retains
     const f = ordinaryRuntimeFixture({ enabled, optedIn });
     try {
       await f.runtime.start();
-      assert.equal(f.intents, (1 << 0) | (1 << 9) | (enabled && optedIn ? 1 << 15 : 0));
+      assert.equal(f.intents, (1 << 0) | (1 << 9) | (1 << 12) | (enabled && optedIn ? 1 << 15 : 0));
       await f.dispatch(f.ordinaryMessage);
       assert.equal(f.received.length, enabled && optedIn ? 1 : 0);
       if (f.received.length) {
@@ -579,4 +579,44 @@ test('Discord keeps checked mentions inline and prefixes only missing ones', asy
   await api.createMessage({ channelId: ids.channel, content: `ok <@${ids.actor}> done`, mentionUserIds: [ids.actor, ids.message], retry: false });
   assert.equal(body.content, `<@${ids.message}> ok <@${ids.actor}> done`);
   assert.deepEqual(body.allowed_mentions.users, [ids.actor, ids.message]);
+});
+
+test('a direct message reaches the consumer as a DM without a mention and replies in the same DM', async () => {
+  const f = fixture(); let socket; const received = [];
+  const dm = { id: ids.thread, type: 1, recipients: [{ id: ids.actor, username: 'QA Human' }] };
+  const direct = { id: ids.message, channel_id: ids.thread, author: { id: ids.actor, username: 'QA Human' },
+    type: 0, mentions: [], content: ' /pair', timestamp: '2026-10-05T08:00:00Z' };
+  const api = { ...f.api, ...identityApi, getGatewayBot: async () => ({ url: 'wss://gateway.discord.gg' }),
+    getChannel: async ({ channelId }) => channelId === ids.thread ? dm : f.parent,
+    getGuild: async () => assert.fail('a DM has no guild'), getMessage: async () => direct };
+  const runtime = new DiscordRuntime({ config: { botId: 'discord-qa', platformId: ids.bot, consumerMode: 'external-consumer' },
+    token: 'test-private-token', harness: { ensureRunning: async () => true, createSession: async () => assert.fail('standalone') }, state: {},
+    externalConsumer: async evidence => { received.push(evidence); return { accepted: true }; },
+    createApi: () => api,
+    createWebSocket: () => { socket = new Socket(); queueMicrotask(() => socket.packet({ op: 10, d: { heartbeat_interval: 45000 } })); return socket; },
+    logger: { warn() {}, error() {} }, connectTimeoutMs: 200 });
+  try {
+    await runtime.start();
+    socket.packet({ op: 0, t: 'MESSAGE_CREATE', s: 2, d: direct }); await flush();
+    assert.equal(received.length, 1);
+    assert.deepEqual(received[0].conversation, { kind: 'dm', id: ids.thread });
+    assert.equal(received[0].mentionedAccount, false);
+    assert.deepEqual(received[0].reply, { messageId: ids.message, conversationId: ids.thread, actorId: ids.actor });
+    socket.packet({ op: 0, t: 'MESSAGE_CREATE', s: 3, d: { ...direct, author: { id: ids.role, bot: true } } }); await flush();
+    socket.packet({ op: 0, t: 'MESSAGE_CREATE', s: 4, d: { ...direct, author: { id: ids.role, username: 'Other' } } }); await flush();
+    socket.packet({ op: 0, t: 'MESSAGE_CREATE', s: 5, d: { ...direct, content: '  ' } }); await flush();
+    assert.equal(received.length, 1);
+    const result = await runtime.replyChecked(received[0].reply, 'Paired', { beforeSend: () => true, receipt: true });
+    assert.equal(result.receipt.conversationId, ids.thread);
+    assert.equal(f.sends[0].channelId, ids.thread); assert.equal(f.sends[0].replyToMessageId, ids.message);
+    await runtime.replyChecked(received[0].reply, 'Approval', { beforeSend: () => true, standalone: true });
+    assert.equal(f.sends[1].channelId, ids.thread); assert.equal(f.sends[1].replyToMessageId, undefined);
+  } finally { await runtime.stop(); }
+});
+
+test('a DM channel must have exactly one other recipient', async () => {
+  const api = { getChannel: async () => ({ id: ids.thread, type: 1, recipients: [{ id: ids.bot }] }) };
+  await assert.rejects(inspectDiscordSourceChannel(api, ids.thread, account), { code: 'stale-route' });
+  api.getChannel = async () => ({ id: ids.thread, type: 1, recipients: [{ id: ids.actor }, { id: ids.role }] });
+  await assert.rejects(inspectDiscordSourceChannel(api, ids.thread, account), { code: 'stale-route' });
 });
