@@ -30,6 +30,15 @@ test('cards render bounded plain text and only once/reject controls', () => {
   assert.throws(() => externalApprovalCard({ ...card, detail: 'a'.repeat(16001) }), { code: 'bad-request' });
 });
 
+test('cards offer only the decisions the viewer may make', () => {
+  const actions = value => JSON.parse(externalApprovalCard(value)).elements[1].actions.map(button => button.value.action);
+  assert.deepEqual(actions({ ...card, actions: ['allowed-once'] }), ['allowed-once']);
+  assert.deepEqual(actions({ ...card, actions: ['rejected'], rules: ['exact'] }), ['rejected']);
+  assert.deepEqual(actions({ ...card, actions: ['allowed-once', 'rejected'], rules: ['exact'] }), ['allowed-once', 'rejected', 'preview-exact']);
+  for (const bad of [[], ['approve'], ['rejected', 'rejected'], 'rejected'])
+    assert.throws(() => externalApprovalCard({ ...card, actions: bad }), { code: 'bad-request' });
+});
+
 test('exact rule preview and nonce-bound confirmation remain separate from ordinary approval and questions', () => {
   const offered = JSON.parse(externalApprovalCard({ ...card, rules: ['exact'] }));
   assert.deepEqual(offered.elements[1].actions.map(a => a.value.action), ['allowed-once', 'rejected', 'preview-exact']);

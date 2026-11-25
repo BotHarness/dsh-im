@@ -13,6 +13,9 @@ export function externalApprovalCard(value) {
   const elements = [{ tag: 'div', text: { tag: 'plain_text', content: value.detail } }];
   if (value.rules !== undefined && (!Array.isArray(value.rules) || ![1, 2].includes(value.rules.length)
     || value.rules[0] !== 'exact' || (value.rules.length === 2 && value.rules[1] !== 'all-opaque'))) refuse('bad-request');
+  if (value.actions !== undefined && (!Array.isArray(value.actions) || value.actions.length < 1 || value.actions.length > 2
+    || value.actions.some(action => !['allowed-once', 'rejected'].includes(action)) || new Set(value.actions).size !== value.actions.length)) refuse('bad-request');
+  const offers = action => value.actions === undefined || value.actions.includes(action);
   if (value.ruleConfirmation !== undefined && (!uuid.test(value.ruleConfirmation.id ?? '') || !['exact', 'all-opaque'].includes(value.ruleConfirmation.kind))) refuse('bad-request');
   const ruleAction = (action, label, type = 'default') => ({ tag: 'button', type,
     text: { tag: 'plain_text', content: label }, value: { namespace: 'botharness/approval-rule-v1', requestId: value.requestId, action,
@@ -24,10 +27,10 @@ export function externalApprovalCard(value) {
     ruleAction('cancel-rule', 'Back / 返回'),
   ] });
   else if (value.status === 'pending') elements.push({ tag: 'action', actions: [
-    { tag: 'button', type: 'primary', text: { tag: 'plain_text', content: 'Allow once / 允许一次' }, value: { namespace: 'botharness/approval-v1', requestId: value.requestId, action: 'allowed-once' } },
-    { tag: 'button', type: 'danger', text: { tag: 'plain_text', content: 'Reject / 拒绝' }, value: { namespace: 'botharness/approval-v1', requestId: value.requestId, action: 'rejected' } },
-    ...(value.rules ? [ruleAction('preview-exact', 'Allow matching operations… / 批准匹配操作…')] : []),
-    ...(value.rules?.includes('all-opaque') ? [ruleAction('preview-all-opaque', 'All opaque tools in this scope… / 此范围内全部不透明工具…', 'danger')] : []),
+    ...(offers('allowed-once') ? [{ tag: 'button', type: 'primary', text: { tag: 'plain_text', content: 'Allow once / 允许一次' }, value: { namespace: 'botharness/approval-v1', requestId: value.requestId, action: 'allowed-once' } }] : []),
+    ...(offers('rejected') ? [{ tag: 'button', type: 'danger', text: { tag: 'plain_text', content: 'Reject / 拒绝' }, value: { namespace: 'botharness/approval-v1', requestId: value.requestId, action: 'rejected' } }] : []),
+    ...(value.rules && offers('allowed-once') ? [ruleAction('preview-exact', 'Allow matching operations… / 批准匹配操作…')] : []),
+    ...(value.rules?.includes('all-opaque') && offers('allowed-once') ? [ruleAction('preview-all-opaque', 'All opaque tools in this scope… / 此范围内全部不透明工具…', 'danger')] : []),
   ] });
   // Both the initial card and later PATCH need shared mode for receiver-visible updates.
   return JSON.stringify({ config: { wide_screen_mode: true, update_multi: true }, header: { title: { tag: 'plain_text', content: value.title }, template: 'blue' }, elements });

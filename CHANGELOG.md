@@ -8,6 +8,9 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ### Fixed / 修复
 
+- 飞书执行审批卡支持可选的 `actions`（`allowed-once`、`rejected`），只显示查看者有权执行的按钮；没有拒绝权限的人不再看到「拒绝」按钮。不传时仍显示两个按钮（[BotHarness #5282](https://github.com/BotHarness/DeepSeekBot/issues/5282)）。
+  Lark tool approval cards accept an optional `actions` list (`allowed-once`, `rejected`) and show only those buttons, so someone without reject permission no longer sees Reject. Without it, both buttons are shown as before ([BotHarness #5282](https://github.com/BotHarness/DeepSeekBot/issues/5282)).
+
 - 飞书提问卡与执行审批卡可以发到群聊：BotHarness 决定在群里交互时（群内交互开启、来源是该群里 @Bot 的消息），卡片回复到那条消息并可在群里更新，不再以 `stale-route` 拒绝；仍只接受私聊和普通群，并继续核对原消息发送者（[BotHarness #5271](https://github.com/BotHarness/DeepSeekBot/issues/5271)）。
   Lark question and tool approval cards can be sent to a group chat. When BotHarness chooses the group (group interactions are on and the source is an @Bot message in that group), the card replies to that message and can be updated there instead of being refused as `stale-route`. Only private chats and ordinary groups are accepted, and the source sender is still checked ([BotHarness #5271](https://github.com/BotHarness/DeepSeekBot/issues/5271)).
 
