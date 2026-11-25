@@ -188,7 +188,7 @@ export function discordReplyMentions(mentionUserIds, route, source) {
   return [...new Set(mentionUserIds)];
 }
 
-export async function sendDiscordReply(api, account, route, text, { signal, beforeSend, assertCurrent = () => {}, receipt = false, mentionUserIds } = {}) {
+export async function sendDiscordReply(api, account, route, text, { signal, beforeSend, assertCurrent = () => {}, receipt = false, mentionUserIds, standalone = false } = {}) {
   if (typeof text !== 'string' || !text.trim() || text.length > 2000) throw discordRefusal('bad-request');
   const checked = await qualifyDiscordReply(api, account, route, signal);
   const mentions = discordReplyMentions(mentionUserIds, route, checked.source);
@@ -197,7 +197,8 @@ export async function sendDiscordReply(api, account, route, text, { signal, befo
   assertCurrent();
   if (beforeSend && beforeSend() !== true) throw discordRefusal('stale-route');
   signal?.throwIfAborted();
-  return sendDiscordCheckedText(api, account, checked.channel, text, { signal, receipt, replyToMessageId: route.messageId,
+  return sendDiscordCheckedText(api, account, checked.channel, text, { signal, receipt,
+    replyToMessageId: standalone === true && checked.channel.direct ? undefined : route.messageId,
     ...(mentions.length ? { mentionUserIds: mentions } : {}) });
 }
 

@@ -609,6 +609,8 @@ test('a direct message reaches the consumer as a DM without a mention and replie
     const result = await runtime.replyChecked(received[0].reply, 'Paired', { beforeSend: () => true, receipt: true });
     assert.equal(result.receipt.conversationId, ids.thread);
     assert.equal(f.sends[0].channelId, ids.thread); assert.equal(f.sends[0].replyToMessageId, ids.message);
+    await runtime.replyChecked(received[0].reply, 'Approval', { beforeSend: () => true, standalone: true });
+    assert.equal(f.sends[1].channelId, ids.thread); assert.equal(f.sends[1].replyToMessageId, undefined);
   } finally { await runtime.stop(); }
 });
 
