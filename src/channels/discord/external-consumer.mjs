@@ -4,6 +4,7 @@ export function discordRefusal(code) { return Object.assign(new Error(code), { c
 export function discordSnowflake(value) { return typeof value === 'string' && /^[0-9]{5,30}$/.test(value); }
 const PUBLIC_THREAD = 11;
 const TEXT_CHANNEL = 0;
+const DM_CHANNEL = 1;
 const VIEW = 1n << 10n;
 const SEND = 1n << 11n;
 const ATTACH = 1n << 15n;
@@ -68,6 +69,12 @@ export async function inspectDiscordSourceChannel(api, channelId, account, signa
   signal?.throwIfAborted();
   try {
     const channel = await api.getChannel({ channelId, signal });
+    if (channel?.id === channelId && channel.type === DM_CHANNEL && channel.guild_id === undefined) {
+      const recipient = Array.isArray(channel.recipients) && channel.recipients.length === 1 ? channel.recipients[0] : undefined;
+      if (!discordSnowflake(recipient?.id) || recipient.id === account.userId) throw discordRefusal('stale-route');
+      signal?.throwIfAborted();
+      return { conversationId: channel.id, channelId: channel.id, direct: true, recipientId: recipient.id };
+    }
     if (channel?.id !== channelId || !discordSnowflake(channel.guild_id)) throw discordRefusal('stale-route');
     const isThread = channel.type === PUBLIC_THREAD;
     if (channel.type !== TEXT_CHANNEL && !isThread) throw discordRefusal('reply-permission-denied');
@@ -133,8 +140,9 @@ function normalizeDiscordHumanText(message, { botId, account, channel, eventId }
     || message.content.length > 16000 || !Array.isArray(message.mentions)) return null;
   if (message.guild_id !== channel.guildId || message.channel_id !== channel.channelId)
     throw discordRefusal('stale-route');
+  if (channel.direct && (message.author.bot === true || message.author.id !== channel.recipientId)) return null;
   const mentionedAccount = discordMessageMentionsAccount(message, account, channel);
-  if ((requireMention || message.author.bot === true) && !mentionedAccount) return null;
+  if (!channel.direct && (requireMention || message.author.bot === true) && !mentionedAccount) return null;
   const timestamp = Date.parse(message.timestamp);
   if (!Number.isFinite(timestamp) || typeof eventId !== 'string' || !eventId || eventId.length > 512)
     throw discordRefusal('invalid-inbound');
@@ -145,7 +153,7 @@ function normalizeDiscordHumanText(message, { botId, account, channel, eventId }
       ...(user.id === account.userId ? { name: account.name } : {}) }));
   return { version: 1, channel: 'discord', botId, fingerprint: account.fingerprint,
     eventId, messageId: message.id, actor: { kind: message.author.bot === true ? 'bot' : 'user', id: message.author.id, ...(name ? { name: name.slice(0, 512) } : {}) },
-    conversation: { kind: 'group', id: channel.conversationId, ...(channel.name ? { name: channel.name } : {}) }, mentions, mentionedAccount,
+    conversation: { kind: channel.direct ? 'dm' : 'group', id: channel.conversationId, ...(channel.name ? { name: channel.name } : {}) }, mentions, mentionedAccount,
     at: new Date(timestamp).toISOString(), text: message.content,
     reply: { messageId: message.id, conversationId: channel.conversationId, actorId: message.author.id,
       ...(channel.threadId ? { threadId: channel.threadId } : {}) },

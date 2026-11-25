@@ -6,6 +6,11 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ## [Unreleased]
 
+### Added / 新增
+
+- Discord 独占外部 Consumer 接收发给 Bot 的 Human 私聊（`conversation.kind: 'dm'`，不需要 @），Gateway 增加非特权的 `DIRECT_MESSAGES` intent，受校验的回复直接发回该私聊；私聊里的 Bot 消息、空消息和非私聊对象发的消息仍被排除（[BotHarness #5305](https://github.com/BotHarness/DeepSeekBot/issues/5305)）。
+  The Discord exclusive external Consumer accepts Human direct messages to the Bot (`conversation.kind: 'dm'`, no mention needed), the Gateway adds the non-privileged `DIRECT_MESSAGES` intent, and checked replies go back to that DM. Bot messages, empty messages and messages from anyone other than the DM's recipient are still excluded ([BotHarness #5305](https://github.com/BotHarness/DeepSeekBot/issues/5305)).
+
 ### Fixed / 修复
 
 - 飞书执行审批卡支持可选的 `actions`（`allowed-once`、`rejected`），只显示查看者有权执行的按钮；没有拒绝权限的人不再看到「拒绝」按钮。不传时仍显示两个按钮（[BotHarness #5282](https://github.com/BotHarness/DeepSeekBot/issues/5282)）。
