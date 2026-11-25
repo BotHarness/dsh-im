@@ -67,15 +67,16 @@ function fixture() {
   return { client, counts: () => ({ creates, patches }) };
 }
 
-test('checked question writes retain private native destination, own receipt and final authority fences', async () => {
+test('checked question writes keep own receipt and final authority fences in private and group chats', async () => {
   const f = fixture();
-  const options = { render: externalQuestionCard, privateOnly: true, beforeSend: () => true };
+  const options = { render: externalQuestionCard, beforeSend: () => true };
   const result = await replyExternalApprovalCard(f.client, route, card, options);
   assert.equal(result.receipt.messageId, 'om_card');
   await updateExternalApprovalCard(f.client, identity, result.receipt, { ...card, status: 'answered' }, options);
   assert.deepEqual(f.counts(), { creates: 1, patches: 1 });
   await assert.rejects(replyExternalApprovalCard(f.client, route, card, { ...options, beforeSend: () => false }), { code: 'stale-route' });
   f.client.im.v1.chat.get = async () => ({ code: 0, data: { chat_mode: 'group' } });
-  await assert.rejects(updateExternalApprovalCard(f.client, identity, result.receipt, card, options), { code: 'stale-route' });
-  assert.deepEqual(f.counts(), { creates: 1, patches: 1 });
+  const group = await replyExternalApprovalCard(f.client, route, card, options);
+  await updateExternalApprovalCard(f.client, identity, group.receipt, { ...card, status: 'answered' }, options);
+  assert.deepEqual(f.counts(), { creates: 2, patches: 2 });
 });

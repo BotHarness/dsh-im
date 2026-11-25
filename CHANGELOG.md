@@ -8,6 +8,9 @@ This file records the notable changes in each dsh-im release. Its format follows
 
 ### Fixed / 修复
 
+- 飞书提问卡与执行审批卡可以发到群聊：BotHarness 决定在群里交互时（群内交互开启、来源是该群里 @Bot 的消息），卡片回复到那条消息并可在群里更新，不再以 `stale-route` 拒绝；仍只接受私聊和普通群，并继续核对原消息发送者（[BotHarness #5271](https://github.com/BotHarness/DeepSeekBot/issues/5271)）。
+  Lark question and tool approval cards can be sent to a group chat. When BotHarness chooses the group (group interactions are on and the source is an @Bot message in that group), the card replies to that message and can be updated there instead of being refused as `stale-route`. Only private chats and ordinary groups are accepted, and the source sender is still checked ([BotHarness #5271](https://github.com/BotHarness/DeepSeekBot/issues/5271)).
+
 - 飞书受校验的 Bot 回复（回复原消息与发到群聊）使用 Markdown 时，改用与聊天相同的原生 Markdown 卡片发送，加粗、标题、列表、表格不再以星号、井号、竖线原样显示；纯文本和带 `<at user_id>` 提及的回复仍按文本发送，保持其他 Bot 的提及接收与自身 Echo 确认不变（[BotHarness #2792](https://github.com/BotHarness/DeepSeekBot/issues/2792)）。
   Checked Lark Bot replies, both replies to the source message and posts to a group, are sent as the same native Markdown card as chat when they use Markdown, so bold, headings, lists and tables no longer show as raw asterisks, hashes and pipes. Plain replies and replies carrying a `<at user_id>` mention stay text, so other Bots still receive the mention and own Echo confirmation is unchanged ([BotHarness #2792](https://github.com/BotHarness/DeepSeekBot/issues/2792)).
 
