@@ -97,7 +97,7 @@ export async function replyExternalApprovalCard(client, route, card, { signal, a
   const current = await qualifyExternalReply(client, route, signal);
   if (current.actorId !== route.actorId) refuse('stale-route');
   const chat = await client.im.v1.chat.get({ path: { chat_id: route.conversationId } }, { signal });
-  if (chat?.code !== 0 || !(card.kind === 'pairing' ? ['p2p', 'group'] : ['p2p']).includes(chat?.data?.chat_mode)) refuse('stale-route');
+  if (chat?.code !== 0 || !['p2p', 'group'].includes(chat?.data?.chat_mode)) refuse('stale-route');
   assertCurrent?.();
   signal?.throwIfAborted();
   if (typeof beforeSend !== 'function' || beforeSend() !== true) refuse('stale-route');
@@ -109,7 +109,7 @@ export async function replyExternalApprovalCard(client, route, card, { signal, a
   return { sent: true, receipt: { version: 1, messageId: result.data.message_id, conversationId: result.data.chat_id } };
 }
 
-export async function updateExternalApprovalCard(client, identity, receipt, card, { signal, assertCurrent, beforeSend, render = externalApprovalCard, privateOnly = false } = {}) {
+export async function updateExternalApprovalCard(client, identity, receipt, card, { signal, assertCurrent, beforeSend, render = externalApprovalCard } = {}) {
   const content = render(card);
   if (!identifier(receipt?.messageId, 'om') || !identifier(receipt?.conversationId, 'oc')) refuse('bad-request');
   assertCurrent?.();
@@ -119,10 +119,6 @@ export async function updateExternalApprovalCard(client, identity, receipt, card
     ((source.sender.id_type === 'app_id' && source.sender.id === identity.appId) ||
       (source.sender.id_type === 'open_id' && source.sender.id === identity.botOpenId));
   if (result?.code !== 0 || !ownSender || source.deleted || source.chat_id !== receipt.conversationId || source.msg_type !== 'interactive') refuse('stale-route');
-  if (privateOnly) {
-    const chat = await client.im.v1.chat.get({ path: { chat_id: receipt.conversationId } }, { signal });
-    if (chat?.code !== 0 || chat?.data?.chat_mode !== 'p2p') refuse('stale-route');
-  }
   assertCurrent?.();
   signal?.throwIfAborted();
   if (typeof beforeSend !== 'function' || beforeSend() !== true) refuse('stale-route');

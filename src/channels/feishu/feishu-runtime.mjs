@@ -885,8 +885,8 @@ export class FeishuRuntime {
         throw Object.assign(new Error('bot-not-connected'), { code: 'bot-not-connected' });
     };
     assertCurrent();
-    return update ? updateExternalApprovalCard(client, identity, route, card, { signal, assertCurrent, beforeSend, render: externalQuestionCard, privateOnly: true })
-      : replyExternalApprovalCard(client, route, card, { signal, assertCurrent, beforeSend, render: externalQuestionCard, privateOnly: true });
+    return update ? updateExternalApprovalCard(client, identity, route, card, { signal, assertCurrent, beforeSend, render: externalQuestionCard })
+      : replyExternalApprovalCard(client, route, card, { signal, assertCurrent, beforeSend, render: externalQuestionCard });
   }
 
   async historyChecked(identity, route, query, { signal } = {}) {

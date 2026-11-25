@@ -106,13 +106,14 @@ function clientFixture() {
   return { client, counts: () => ({ creates, patches }) };
 }
 
-test('group-only pairing review is checked against the original source while native approvals remain private', async () => {
+test('group pairing and approval cards are checked against the original source', async () => {
   const f = clientFixture();
   f.client.im.v1.chat.get = async () => ({ code: 0, data: { chat_mode: 'group' } });
   assert.equal((await replyExternalApprovalCard(f.client, route, pairingCard, { beforeSend: () => true })).sent, true);
-  await assert.rejects(replyExternalApprovalCard(f.client, route, card, { beforeSend: () => true }), { code: 'stale-route' });
+  assert.equal((await replyExternalApprovalCard(f.client, route, card, { beforeSend: () => true })).sent, true);
   await assert.rejects(replyExternalApprovalCard(f.client, { ...route, actorId: 'ou_wrong' }, pairingCard, { beforeSend: () => true }), { code: 'stale-route' });
-  assert.deepEqual(f.counts(), { creates: 1, patches: 0 });
+  await assert.rejects(replyExternalApprovalCard(f.client, { ...route, actorId: 'ou_wrong' }, card, { beforeSend: () => true }), { code: 'stale-route' });
+  assert.deepEqual(f.counts(), { creates: 2, patches: 0 });
 });
 
 test('checked approval creation and final update are shared cards visible to the receiver', async () => {
@@ -137,14 +138,16 @@ test('checked approval creation and final update are shared cards visible to the
   assert.equal(writes[1].elements.some(element => element.tag === 'action'), false);
 });
 
-test('send verifies original sender/private conversation and fences immediately before writing', async () => {
+test('send verifies original sender and conversation kind and fences immediately before writing', async () => {
   const f = clientFixture();
   await assert.rejects(replyExternalApprovalCard(f.client, { ...route, actorId: 'ou_other' }, card, { beforeSend: () => true }), { code: 'stale-route' });
   await assert.rejects(replyExternalApprovalCard(f.client, route, card, { beforeSend: () => false }), { code: 'stale-route' });
   assert.equal(f.counts().creates, 0);
   const sent = await replyExternalApprovalCard(f.client, route, card, { beforeSend: () => true });
   assert.equal(sent.receipt.messageId, 'om_card');
-  f.client.im.v1.chat.get = async () => ({ code: 0, data: { chat_mode: 'group' } });
+  f.client.im.v1.chat.get = async () => ({ code: 0, data: { chat_mode: 'topic' } });
+  await assert.rejects(replyExternalApprovalCard(f.client, route, card, { beforeSend: () => true }), { code: 'stale-route' });
+  f.client.im.v1.chat.get = async () => ({ code: 230002, data: {} });
   await assert.rejects(replyExternalApprovalCard(f.client, route, card, { beforeSend: () => true }), { code: 'stale-route' });
   assert.equal(f.counts().creates, 1);
 });
