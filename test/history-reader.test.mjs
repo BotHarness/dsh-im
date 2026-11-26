@@ -49,3 +49,28 @@ test('requests server names and preserves sender / mention IDs without guessing 
  assert.deepEqual(page.events[0].mentions,[{id:'ou-bot',key:'@_user_1',name:'QA Bot'}]);
  assert.deepEqual(page.events[1].actor,{kind:'user',id:'ou-human'});
 });
+
+test('keeps checked history in its actual ID namespace and never invents an absent tenant', async () => {
+ const invalid = {...item('om-anchor'), mentions:[{key:'@_user_1',id:'someone',id_type:'user_id'}]};
+ const valid = {...item('om-anchor'), updated:false, mentions:[{key:'@_user_1',id:'cli-1',id_type:'app_id',
+   tenant_key:'tenant-current'}, {key:'@_user_2',id:'ou-human',id_type:'open_id',tenant_key:'tenant-current'}]};
+ const bot = client();
+ bot.im.v1.message.get = async () => ({code:0,data:{items:[valid]}});
+ const page = await readExternalHistory(bot,identity,route,{scope:'message',limit:1});
+ assert.equal(page.omitted,0);
+ assert.equal(page.events.length,1);
+ assert.equal(bot.calls.length,0);
+ assert.equal(page.coverage,'provider-verified-source');
+ assert.equal(page.source,page.events[0]);
+ assert.equal(page.events[0].tenantId,undefined);
+ assert.equal(page.events[0].appId,identity.appId);
+ assert.deepEqual(page.events[0].mentions,[{id:'cli-1',idType:'app_id',key:'@_user_1',tenantId:'tenant-current',kind:'bot'},
+   {id:'ou-human',idType:'open_id',key:'@_user_2',tenantId:'tenant-current'}]);
+ assert.equal(page.events[0].mentionedAccount,true);
+ bot.im.v1.message.get = async () => ({code:0,data:{items:[{...valid,updated:true}]}});
+ await assert.rejects(readExternalHistory(bot,identity,route,{scope:'message',limit:1}),{code:'stale-route'});
+ bot.im.v1.message.get = async () => ({code:0,data:{items:[{...valid,updated:undefined}]}});
+ await assert.rejects(readExternalHistory(bot,identity,route,{scope:'message',limit:1}),{code:'source-unavailable'});
+ bot.im.v1.message.get = async () => ({code:0,data:{items:[invalid]}});
+ await assert.rejects(readExternalHistory(bot,identity,route,{scope:'message',limit:1}),{code:'source-unavailable'});
+});
