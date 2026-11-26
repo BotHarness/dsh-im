@@ -67,9 +67,10 @@ async function fixture(t, { sourceImages = true, production = false } = {}) {
     });
     controller = created.controller;
     productionAdapter = created.deliveryAdapter;
-    t.after(() => created.close());
+    t.after(async () => { await controller.close({ drain: false }); await created.close(); });
   }
-  t.after(() => controller.close());
+  // Negative admission fixtures cancel explicitly instead of requesting a resumable drain.
+  t.after(() => controller.close({ drain: false }));
   await controller.initialize();
   const service = createDeliveryService();
   const unregister = service.registerAdapter(productionAdapter ?? createDeliveryAdapter({ channel: 'qq',

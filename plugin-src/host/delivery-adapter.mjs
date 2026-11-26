@@ -240,10 +240,25 @@ export function createDeliveryAdapter({ channel, workspaces, coreController, sta
   }
   return Object.freeze({
     channel,
+    releaseSource: (botId, route, options) => {
+      if (typeof coreController.releaseSource !== 'function')
+        throw Object.assign(new Error('capability-unavailable'), { code: 'capability-unavailable' });
+      return coreController.releaseSource(botId, route, options);
+    },
     consumeInbound: (botId, options) => {
       if (typeof coreController.consumeInbound !== 'function')
         throw Object.assign(new Error('capability-unavailable'), { code: 'capability-unavailable' });
       return coreController.consumeInbound(botId, options);
+    },
+    quiesceInbound: (botId, options) => {
+      if (typeof coreController.quiesceInbound !== 'function')
+        throw Object.assign(new Error('capability-unavailable'), { code: 'capability-unavailable' });
+      return coreController.quiesceInbound(botId, options);
+    },
+    resumeInbound: (botId, options) => {
+      if (typeof coreController.resumeInbound !== 'function')
+        throw Object.assign(new Error('capability-unavailable'), { code: 'capability-unavailable' });
+      return coreController.resumeInbound(botId, options);
     },
     reactionChecked: (botId, route, reaction, options) => {
       if (channel !== 'feishu' || typeof coreController.reactionChecked !== 'function')

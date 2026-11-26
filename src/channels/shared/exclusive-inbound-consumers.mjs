@@ -5,6 +5,8 @@ function refusal(code) {
 export class ExclusiveInboundConsumers {
   #entries = new Map();
 
+  isRegistered(botId) { return this.#entries.has(botId); }
+
   acceptsFiles(botId) { return this.#entries.get(botId)?.sourceFiles === true; }
   acceptsImages(botId) { return this.#entries.get(botId)?.sourceImages === true; }
   acceptsVoiceTranscripts(botId) { return this.#entries.get(botId)?.sourceVoiceTranscripts === true; }
@@ -56,7 +58,7 @@ export class ExclusiveInboundConsumers {
     deliverySignal.throwIfAborted();
     if (this.#entries.get(botId) !== entry) throw refusal('consumer-unavailable');
     if (result?.accepted !== true) throw refusal('ingress-not-accepted');
-    return { accepted: true };
+    return { accepted: true, ...(result.complete === true ? { complete: true } : {}) };
   }
 
   async acceptAction(botId, evidence, signal) {

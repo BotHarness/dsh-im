@@ -1,12 +1,13 @@
 import { isQqAddressedGroupMessage, isQqAddressedMessage, isQqDirectMessage } from './external-addressing.mjs';
 import { createHash } from 'node:crypto';
-import { ApiError, getNextMsgSeq, messagePath } from '@tencent-connect/qqbot-nodejs/protocol';
+import { ApiError, messagePath } from '@tencent-connect/qqbot-nodejs/protocol';
 import { QqNativeReplyObservations, qqNativeIdentifier as identifier } from './native-reply-observations.mjs';
 import { qqSourceAttachments, readQqSourceAttachment, checkedQqImageFile, uploadQqCheckedMedia } from './external-images.mjs';
 import { checkedQqGenericFile, qqQuotedMessage } from './external-files.mjs';
 import { qqAttachmentLabel, qqReadableAttachments, qqSkippedAttachmentNotes } from './external-attachments.mjs';
 import { qqVoiceMessage } from './external-voice.mjs';
 import { qqExternalMentions } from './external-mentions.mjs';
+import { createQqReplyProof, qqContentHash } from './state-store.mjs';
 
 export function qqRefusal(code) { return Object.assign(new Error(code), { code }); }
 
@@ -108,7 +109,7 @@ function withReadableAttachments(message, options) {
   return { ...message, content, attachments: readable.length ? readable : undefined };
 }
 
-/** Bounded, process-local source proof, never a second durable Inbox or history. */
+/** Retain native reply proofs; canonical message content belongs to the consumer. */
 export class QqExternalConsumer {
   #bot;
   #account;
@@ -124,7 +125,8 @@ export class QqExternalConsumer {
   #rateLimitRetryDelaysMs;
   #sources = new Map();
   #posts = new Map();
-  constructor({ bot, account, botId, accept, sourceImages = () => false, sourceFiles = () => false, sourceVoiceTranscripts = () => false, sourceVoiceAudio = () => false, ordinaryText = () => false, directMessages = () => false, reportNativeObservation = () => {}, reportNativeFrame, nativeUser, rateLimitRetryDelaysMs = RATE_LIMIT_RETRY_DELAYS_MS }) {
+  #state;
+  constructor({ bot, account, botId, accept, state, sourceImages = () => false, sourceFiles = () => false, sourceVoiceTranscripts = () => false, sourceVoiceAudio = () => false, ordinaryText = () => false, directMessages = () => false, reportNativeObservation = () => {}, reportNativeFrame, nativeUser, rateLimitRetryDelaysMs = RATE_LIMIT_RETRY_DELAYS_MS }) {
     this.#rateLimitRetryDelaysMs = rateLimitRetryDelaysMs;
     this.#bot = bot; this.#account = account; this.#botId = botId; this.#accept = accept;
     this.#observations = new QqNativeReplyObservations({ account, report: reportNativeObservation,
@@ -135,6 +137,16 @@ export class QqExternalConsumer {
     this.#sourceVoiceAudio = sourceVoiceAudio;
     this.#ordinaryText = ordinaryText;
     this.#directMessages = directMessages;
+    this.#state = state;
+  }
+
+  async #persistSource(source) {
+    if (!this.#state?.putReplyProof) return;
+    await this.#state.putReplyProof({ fingerprint: this.#account.fingerprint,
+      route: source.event.reply, at: source.event.at, kind: source.event.conversation.kind,
+      mentionedAccount: source.event.mentionedAccount, digest: source.digest,
+      contentHash: source.contentHash, contentHashAlgorithm: 'sha256-json-string-v1',
+      attempts: source.attempts, sequence: source.sequence });
   }
   recordNativeReceipt(receipt, signal) {
     this.#observations.sent(receipt.conversationId, receipt.messageId, signal);
@@ -170,32 +182,68 @@ export class QqExternalConsumer {
     const event = base && voice ? { ...(media?.event ?? base), voice: voice.voice } : media?.event ?? base;
     if (!event) return;
     signal.throwIfAborted();
-    const prior = this.#sources.get(event.messageId);
-    if (prior && JSON.stringify(prior.event) !== JSON.stringify(event)) throw qqRefusal('stale-route');
+    const prior = this.#sources.get(event.messageId)
+      ?? this.#state?.replyProof?.(this.#account.fingerprint, event.messageId);
+    const contentHash = qqContentHash(event.text);
+    const { digest } = createQqReplyProof({ fingerprint: this.#account.fingerprint, route: event.reply,
+      at: event.at, kind: event.conversation.kind, mentionedAccount: event.mentionedAccount,
+      contentHash });
+    if (prior && prior.digest !== digest) throw qqRefusal('stale-route');
     // Consumer-owned objects never become the Provider's source authority.
-    if (!prior) this.#sources.set(event.messageId, { event: structuredClone(event),
-      ...(media ? { files: structuredClone(media.files) } : {}), attempts: 0 });
+    if (!this.#sources.has(event.messageId)) {
+      const source = { event: structuredClone(event), digest, contentHash,
+        ...(media ? { files: structuredClone(media.files) } : {}), attempts: prior?.attempts ?? 0, sequence: prior?.sequence ?? 0 };
+      await this.#persistSource(source);
+      signal.throwIfAborted();
+      this.#sources.set(event.messageId, source);
+    }
     while (this.#sources.size > 2000) this.#sources.delete(this.#sources.keys().next().value);
     // The external consumer acknowledges only after canonical ingestion commits.
-    return this.#accept(event, signal);
+    const result = await this.#accept(event, signal);
+    if (result?.accepted !== true) throw qqRefusal('ingress-not-accepted');
+    if (result.complete === true) await this.release(event.reply, signal);
+    return result;
   }
   #source(route, signal) {
     if (signal?.aborted) throw qqRefusal('cancelled');
-    const source = this.#sources.get(route?.messageId);
+    let source = this.#sources.get(route?.messageId);
+    const proof = route?.messageId && this.#state?.replyProof?.(this.#account.fingerprint, route.messageId);
+    if (!source && proof) {
+      source = { event: { reply: proof.route, at: proof.at, mentionedAccount: proof.mentionedAccount,
+        conversation: { id: proof.route.conversationId, kind: proof.kind } },
+      digest: proof.digest, contentHash: proof.contentHash, attempts: proof.attempts, sequence: proof.sequence };
+      this.#sources.set(route.messageId, source);
+      while (this.#sources.size > 2000) this.#sources.delete(this.#sources.keys().next().value);
+    }
     if (!source) throw qqRefusal('source-not-found');
     if (Object.keys(route).some(key => !['messageId', 'conversationId', 'actorId'].includes(key))
       || ['messageId', 'conversationId', 'actorId'].some(key => source.event.reply[key] !== route[key]))
       throw qqRefusal('stale-route');
+    const persisted = this.#state?.replyProof?.(this.#account.fingerprint, route.messageId);
+    if (persisted) {
+      source.attempts = persisted.attempts;
+      source.sequence = persisted.sequence;
+    }
     return source;
   }
-  qualify(route, signal) {
+  #replySource(route, signal, checkBudget = true) {
     const source = this.#source(route, signal);
     const direct = source.event.conversation.kind === 'dm';
     if (!direct && !source.event.mentionedAccount) throw qqRefusal('capability-unavailable');
     if (Date.now() - Date.parse(source.event.at) >= PASSIVE_REPLY_WINDOW_MS[direct ? 'c2c' : 'group'])
       throw qqRefusal('reply-window-expired');
-    if (source.attempts >= PASSIVE_REPLY_BUDGET[direct ? 'c2c' : 'group']) throw qqRefusal('reply-limit-exceeded');
-    return structuredClone(source.event.reply);
+    if (checkBudget && source.attempts >= PASSIVE_REPLY_BUDGET[direct ? 'c2c' : 'group']) throw qqRefusal('reply-limit-exceeded');
+    return source;
+  }
+  qualify(route, signal) {
+    return structuredClone(this.#replySource(route, signal).event.reply);
+  }
+  async release(route, signal) {
+    if (signal?.aborted) throw qqRefusal('cancelled');
+    const result = this.#state?.releaseReplyProof
+      ? await this.#state.releaseReplyProof(this.#account.fingerprint, route) : { released: true };
+    if (!result.retainUntil) this.#sources.delete(route.messageId);
+    return result;
   }
   async readImage(route, attachment, options = {}) {
     const source = this.#source(route, options.signal);
@@ -222,21 +270,44 @@ export class QqExternalConsumer {
     const scope = this.#scope(qualified);
     const previous = this.#posts.get(`${scope}:${conversationId}`) ?? Promise.resolve();
     const run = async () => {
+      let sequence;
       for (let retry = 0; ; retry++) {
+        this.#replySource(qualified, signal);
         assertSendable();
         let token;
         try { token = await this.#bot.api.getToken(); }
         catch { throw qqRefusal('source-unavailable'); }
+        this.#replySource(qualified, signal);
         assertSendable();
-        this.#sources.get(qualified.messageId).attempts++;
+        const source = this.#sources.get(qualified.messageId);
+        if (this.#state?.reserveReplyAttempt) {
+          const reserved = await this.#state.reserveReplyAttempt(this.#account.fingerprint,
+            qualified.messageId, PASSIVE_REPLY_BUDGET[scope], sequence);
+          sequence = reserved.sequence;
+        } else {
+          sequence ??= source.sequence + 1;
+          source.attempts++;
+          source.sequence = Math.max(source.sequence, sequence);
+        }
         try {
-          return await this.#bot.apiClient.request(token, 'POST', messagePath(scope, conversationId), body);
+          this.#replySource(qualified, signal, false);
+          assertSendable();
+        } catch (error) {
+          if (this.#state?.refundReplyAttempt)
+            await this.#state.refundReplyAttempt(this.#account.fingerprint, qualified.messageId);
+          else source.attempts--;
+          throw error;
+        }
+        try {
+          const response = await this.#bot.apiClient.request(token, 'POST', messagePath(scope, conversationId), { ...body, msg_seq: sequence });
+          return response;
         } catch (error) {
           const failure = nativeReplyFailure(error);
           if (failure.code !== 'reply-rate-limited' || retry >= this.#rateLimitRetryDelaysMs.length) throw failure;
           // A rate-limited post was refused, so it does not spend the passive reply budget.
-          const source = this.#sources.get(qualified.messageId);
-          if (source) source.attempts--;
+          if (this.#state?.refundReplyAttempt)
+            await this.#state.refundReplyAttempt(this.#account.fingerprint, qualified.messageId);
+          else source.attempts--;
           await retryDelay(this.#rateLimitRetryDelaysMs[retry], signal);
         }
       }
@@ -261,9 +332,7 @@ export class QqExternalConsumer {
     const fileInfo = await uploadQqCheckedMedia(this.#bot, target, file, bytes, signal, image ? 1 : 4);
     await verifyAccount();
     const response = await this.#post(qualified,
-      { msg_type: 7, media: { file_info: fileInfo }, msg_id: qualified.messageId,
-        msg_seq: getNextMsgSeq(qualified.messageId) }, signal, () => {
-        this.qualify(qualified, signal);
+      { msg_type: 7, media: { file_info: fileInfo }, msg_id: qualified.messageId }, signal, () => {
         if (beforeSend() !== true) throw qqRefusal('stale-route');
         if (signal?.aborted) throw qqRefusal('cancelled');
       });
@@ -275,13 +344,13 @@ export class QqExternalConsumer {
     const qualified = this.qualify(route, signal);
     if (typeof text !== 'string' || !text.trim() || text.length > 4000 || mentionUserIds?.length)
       throw qqRefusal('bad-request');
+    const body = { msg_type: 0, content: text, msg_id: qualified.messageId };
     // The token is prepared before the fence so revocation and expiry are
     // checked immediately before the message POST, including on a retry.
     const response = await this.#post(qualified,
-      { msg_type: 0, content: text, msg_id: qualified.messageId, msg_seq: getNextMsgSeq(qualified.messageId) },
+      body,
       signal, () => {
         if (signal?.aborted) throw qqRefusal('cancelled');
-        this.qualify(qualified, signal);
         if (beforeSend !== undefined && beforeSend() !== true) throw qqRefusal('stale-route');
         if (signal?.aborted) throw qqRefusal('cancelled');
       });

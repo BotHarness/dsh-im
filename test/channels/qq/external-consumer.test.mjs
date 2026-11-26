@@ -62,7 +62,7 @@ async function fixture(t, logger) {
       createBot: () => { bot = new PlatformBot(); return bot; },
     }),
   });
-  t.after(() => controller.close());
+  t.after(() => controller.close({ drain: false }));
   await controller.initialize();
   return { controller, store, botId: identity.botId, bot: () => bot, standaloneRuns: () => standaloneRuns };
 }

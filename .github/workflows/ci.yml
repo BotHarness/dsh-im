@@ -28,7 +28,7 @@ jobs:
         run: npm run check
 
   windows-workspaces:
-    name: Workspace regression tests (Windows)
+    name: Workspace and QQ persistence regression tests (Windows)
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -52,3 +52,6 @@ jobs:
           test/conversation-workspace-races.test.mjs
           test/conversation-workspace-switch-order.test.mjs
           test/conversation-workspace-bind-recovery.test.mjs
+          test/channels/qq/state-store.test.mjs
+          test/channels/qq/reply-continuity.test.mjs
+          test/channels/qq/normal-update.test.mjs

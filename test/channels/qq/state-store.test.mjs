@@ -82,22 +82,22 @@ test('QQ stops recovery when backup fails and uses exclusive private backup writ
   const f = await fixture(t, bytes);
   const cause = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
   const writes = [];
-  const write = t.mock.method(fs, 'writeFile', async (path, data, options) => {
-    writes.push({ path, data, options });
-    throw cause;
+  const originalOpen = fs.open;
+  const write = t.mock.method(fs, 'open', async (path, flags, mode) => {
+    if (String(path).includes('.corrupt-')) { writes.push({ path, flags, mode }); throw cause; }
+    return originalOpen(path, flags, mode);
   });
   await assert.rejects(f.store.load(), error => error.code === 'state-backup-failed' && error.cause === cause);
   write.mock.restore();
   assert.equal(writes.length, 1);
   assert.match(writes[0].path, /state\.json\.corrupt-/);
-  assert.equal(writes[0].options.flag, 'wx');
-  assert.equal(writes[0].options.mode, 0o600);
-  assert.deepEqual(writes[0].data, bytes);
+  assert.equal(writes[0].flags, 'wx');
+  assert.equal(writes[0].mode, 0o600);
   assert.deepEqual(await fs.readFile(f.path), bytes);
   assert.equal(f.warnings.length, 0);
 });
 
-for (const stage of ['writeFile', 'rename']) {
+for (const stage of ['open', 'rename']) {
   test(`QQ retains original and backup when recovery ${stage} fails, then retries`, async (t) => {
     const bytes = Buffer.alloc(449);
     const f = await fixture(t, bytes);
